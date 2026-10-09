@@ -171,7 +171,30 @@ function serializeEntities(full: import('@aetherfall/shared').EntitySnapshot[]):
 // Example gameplay extension point (combat/AI systems plug in here):
 // sim.registerSystem((s, dt) => { /* mutate s.players */ }, false);
 
+// OPS: fail fast with a named fatal instead of dying silently. A listener
+// 'error' (EADDRINUSE, EACCES, …) without a handler throws into the event
+// loop; the fatal backstop would catch it, but naming the listener here
+// tells the operator exactly which bind failed.
+function onBindError(name: string, port: number): (err: Error) => void {
+  return (err: Error) => {
+    try {
+      console.error(`[fatal] ${name} failed to bind port ${port}: ${err.message}`);
+    } catch {
+      /* stderr may be gone */
+    }
+    process.exit(1);
+  };
+}
+
+for (const [name, port] of [['PORT', PORT], ['METRICS_PORT', METRICS_PORT]] as const) {
+  if (!Number.isInteger(port)) {
+    console.error(`[fatal] ${name} must be an integer port, got ${process.env[name] ?? '(unset)'}`);
+    process.exit(1);
+  }
+}
+
 const wss = new WebSocketServer({ port: PORT });
+wss.on('error', onBindError('websocket', PORT));
 const sockets = new Map<number, WebSocket>();
 /** Raw auth token per player (for server-side revocation on kick). */
 const tokensByPid = new Map<number, string>();
@@ -290,6 +313,10 @@ drain.addSteps({
 //   POST /drain  -> begin the drain (202), or 200 with the previous report
 //   GET  /healthz-> same body as the metrics port plus `controlPort`
 const CONTROL_PORT = Number(process.env.CONTROL_PORT ?? 0);
+if (process.env.CONTROL_PORT !== undefined && !Number.isInteger(CONTROL_PORT)) {
+  console.error(`[fatal] CONTROL_PORT must be an integer port, got ${process.env.CONTROL_PORT}`);
+  process.exit(1);
+}
 let controlServer: import('node:http').Server | null = null;
 if (Number.isFinite(CONTROL_PORT) && CONTROL_PORT > 0) {
   controlServer = createServer((req, res) => {
@@ -311,6 +338,7 @@ if (Number.isFinite(CONTROL_PORT) && CONTROL_PORT > 0) {
     res.writeHead(404);
     res.end('not found');
   });
+  controlServer.on('error', onBindError('control', CONTROL_PORT));
   controlServer.listen(CONTROL_PORT, () => {
     opsLog.event('control-listening', { controlPort: CONTROL_PORT });
   });
@@ -1052,6 +1080,7 @@ const metricsServer = createServer((req, res) => {
   res.writeHead(404);
   res.end('not found');
 });
+metricsServer.on('error', onBindError('metrics', METRICS_PORT));
 metricsServer.listen(METRICS_PORT, () => {
   console.log(`[server] metrics http://localhost:${METRICS_PORT}/metrics healthz http://localhost:${METRICS_PORT}/healthz`);
 });

@@ -124,8 +124,20 @@ jobs:
           Set-Content .ops/run/shard-0.pid $p.Id
           Write-Host "server pid=$($p.Id)"
           # Readiness poll so a slow runner does not turn into a flaky failure.
+          # The HasExited check comes first: a shard that dies on startup
+          # (bad bind, missing module) must fail fast with its logs attached
+          # instead of burning the full 45s and then failing downstream with
+          # bare ECONNREFUSED.
           $deadline = (Get-Date).AddSeconds(45)
           while ((Get-Date) -lt $deadline) {
+            if ($p.HasExited) {
+              Write-Host "::error::server exited with code $($p.ExitCode) before becoming ready"
+              Write-Host '--- stdout ---'
+              Get-Content .ops/run/shard-0.log -ErrorAction SilentlyContinue
+              Write-Host '--- stderr ---'
+              Get-Content .ops/run/shard-0.err.log -ErrorAction SilentlyContinue
+              exit 1
+            }
             try {
               $h = Invoke-RestMethod http://localhost:9090/healthz -TimeoutSec 2
               if ($h.ok) { Write-Host "ready tick=$($h.tick) control=$($h.controlPort)"; exit 0 }
@@ -134,6 +146,8 @@ jobs:
           }
           Write-Host '::error::server never became ready'
           Get-Content .ops/run/shard-0.err.log -ErrorAction SilentlyContinue
+          Write-Host '--- stdout tail ---'
+          Get-Content .ops/run/shard-0.log -Tail 100 -ErrorAction SilentlyContinue
           exit 1
 
       - name: Smoke test (health + metrics + join + drain)
