@@ -114,7 +114,7 @@ jobs:
       - name: Build
         run: npm run build --workspaces
 
-      - name: Boot the shard (background)
+      - name: Smoke + soak on one shard
         run: |
           New-Item -ItemType Directory -Force -Path .ops/run, .ops/soak | Out-Null
           $p = Start-Process node -ArgumentList 'server/dist/index.js' `
@@ -123,12 +123,10 @@ jobs:
                  -RedirectStandardError  .ops/run/shard-0.err.log
           Set-Content .ops/run/shard-0.pid $p.Id
           Write-Host "server pid=$($p.Id)"
-          # Readiness poll so a slow runner does not turn into a flaky failure.
-          # The HasExited check comes first: a shard that dies on startup
-          # (bad bind, missing module) must fail fast with its logs attached
-          # instead of burning the full 45s and then failing downstream with
-          # bare ECONNREFUSED.
+          # Keep boot, smoke, soak and drain in one step so runner process cleanup
+          # between steps cannot reap the shard mid-job.
           $deadline = (Get-Date).AddSeconds(45)
+          $ready = $false
           while ((Get-Date) -lt $deadline) {
             if ($p.HasExited) {
               Write-Host "::error::server exited with code $($p.ExitCode) before becoming ready"
@@ -136,33 +134,73 @@ jobs:
               Get-Content .ops/run/shard-0.log -ErrorAction SilentlyContinue
               Write-Host '--- stderr ---'
               Get-Content .ops/run/shard-0.err.log -ErrorAction SilentlyContinue
-              exit 1
+              throw 'server died before readiness'
             }
             try {
               $h = Invoke-RestMethod http://localhost:9090/healthz -TimeoutSec 2
-              if ($h.ok) { Write-Host "ready tick=$($h.tick) control=$($h.controlPort)"; exit 0 }
+              if ($h.ok) {
+                Write-Host "ready tick=$($h.tick) control=$($h.controlPort)"
+                $ready = $true
+                break
+              }
             } catch { }
             Start-Sleep -Milliseconds 300
           }
-          Write-Host '::error::server never became ready'
-          Get-Content .ops/run/shard-0.err.log -ErrorAction SilentlyContinue
-          Write-Host '--- stdout tail ---'
-          Get-Content .ops/run/shard-0.log -Tail 100 -ErrorAction SilentlyContinue
-          exit 1
+          if (-not $ready) {
+            Write-Host '::error::server never became ready'
+            Get-Content .ops/run/shard-0.err.log -ErrorAction SilentlyContinue
+            Write-Host '--- stdout tail ---'
+            Get-Content .ops/run/shard-0.log -Tail 100 -ErrorAction SilentlyContinue
+            throw 'readiness timeout'
+          }
 
-      - name: Smoke test (health + metrics + join + drain)
-        run: |
-          # -SkipKill: the soak needs a live server, so the drain stage is run
-          # separately below after the soak finishes.
-          ./ops/scripts/smoke-test.ps1 -Port 8081 -MetricsPort 9090 `
-            -ControlPort 9190 -ShardId shard-0 `
-            -SnapshotFile .ops/soak/metrics-after-smoke.txt -SkipKill
+          $pipelineError = $null
+          try {
+            # -SkipKill: the soak needs a live server, so drain runs after soak.
+            ./ops/scripts/smoke-test.ps1 -Port 8081 -MetricsPort 9090 `
+              -ControlPort 9190 -ShardId shard-0 `
+              -SnapshotFile .ops/soak/metrics-after-smoke.txt -SkipKill
+            if ($LASTEXITCODE -ne 0) { throw "smoke-test failed (exit=$LASTEXITCODE)" }
+
+            ./ops/scripts/soak.ps1 -Bots 20 -Duration 30 -Label ci `
+              -OutDir .ops/soak -Server ws://localhost:8081 `
+              -MaxFailRate 0.1 -MaxTickGaps 0 -MinSnapshotsPerBot 5
+            if ($LASTEXITCODE -ne 0) { throw "soak failed (exit=$LASTEXITCODE)" }
+          } catch {
+            $pipelineError = $_
+          }
+
+          $drainError = $null
+          try {
+            $r = Invoke-RestMethod -Method Post http://localhost:9190/drain -TimeoutSec 5
+            Write-Host "drain accepted: $($r | ConvertTo-Json -Compress)"
+          } catch {
+            $drainError = "drain request failed: $_"
+          }
+          Start-Sleep -Seconds 3
+          try {
+            $log = Get-Content .ops/run/shard-0.log -Raw -ErrorAction SilentlyContinue
+            if (-not $log) { throw 'no shard log' }
+            foreach ($needle in 'drain-begin', 'drain-complete') {
+              if ($log -notmatch $needle) { throw "drain event '$needle' missing from the log" }
+            }
+            if ($log -match '"timedOut":true') { throw 'drain timed out' }
+            Write-Host 'clean shutdown verified (drain-begin + drain-complete, no timeout)'
+          } catch {
+            $drainError = $_
+          }
+
+          if ($pipelineError -or $drainError) {
+            if ($pipelineError) { Write-Host "::error::$pipelineError" }
+            if ($drainError) { Write-Host "::error::$drainError" }
+            throw 'smoke/soak validation failed'
+          }
 
       # A dead shard used to surface only as downstream ECONNREFUSED with no
       # evidence in the job log (artefacts need a login to download). Dump the
       # process state and both shard logs here so the next failure is
       # diagnosable from the log output alone.
-      - name: Dump shard diagnostics on smoke failure
+      - name: Dump shard diagnostics on smoke/soak failure
         if: failure()
         run: |
           node --version
@@ -171,31 +209,6 @@ jobs:
           Get-Content .ops/run/shard-0.err.log -ErrorAction SilentlyContinue
           Write-Host '--- shard-0.log tail (last 40 lines) ---'
           Get-Content .ops/run/shard-0.log -Tail 40 -ErrorAction SilentlyContinue
-
-      - name: Soak (20 bots)
-        run: |
-          ./ops/scripts/soak.ps1 -Bots 20 -Duration 30 -Label ci `
-            -OutDir .ops/soak -Server ws://localhost:8081 `
-            -MaxFailRate 0.1 -MaxTickGaps 0 -MinSnapshotsPerBot 5
-
-      - name: Drain the shard and assert a clean shutdown
-        if: always()
-        run: |
-          try {
-            $r = Invoke-RestMethod -Method Post http://localhost:9190/drain -TimeoutSec 5
-            Write-Host "drain accepted: $($r | ConvertTo-Json -Compress)"
-          } catch {
-            Write-Host "drain request failed (server may already be gone): $_"
-          }
-          # The drain is ordered and must complete well inside its 5s budget.
-          Start-Sleep -Seconds 3
-          $log = Get-Content .ops/run/shard-0.log -Raw -ErrorAction SilentlyContinue
-          if (-not $log) { throw 'no shard log' }
-          foreach ($needle in 'drain-begin', 'drain-complete') {
-            if ($log -notmatch $needle) { throw "drain event '$needle' missing from the log" }
-          }
-          if ($log -match '"timedOut":true') { throw 'drain timed out' }
-          Write-Host 'clean shutdown verified (drain-begin + drain-complete, no timeout)'
 
       - name: Upload smoke + soak artefacts
         if: always()
@@ -208,6 +221,7 @@ jobs:
             .ops/soak/*.txt
             .ops/run/*.log
           if-no-files-found: error
+          include-hidden-files: true
           retention-days: 14
 
   # ---------------------------------------------------------------------------
