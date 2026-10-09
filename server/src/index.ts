@@ -20,7 +20,7 @@ import { OpsLog, nextRequestId } from './opslog.js';
 import { DrainController } from './drain.js';
 // PERF: tick histogram + slow-tick (>50ms) log w/ section
 // breakdown, appended to GET /metrics.
-import { perf } from './perf.js';
+import { perf, SLOW_TICK_MS } from './perf.js';
 // PROTO2: negotiated binary protocol v2 + the serialize-once
 // per-tick pre-pass that feeds it (quantize the world once, splice per viewer).
 import {
@@ -261,6 +261,19 @@ console.log(`[server] runtime node=${process.version} platform=${process.platfor
 // the drain `stop-loop` step registered below can stop it; assigned once the
 // fixed-step loop is created at the bottom of this module.
 let tickScheduler: TickScheduler | null = null;
+
+// ANTICHEAT: slow-tick burst exemption. When the tick loop stalls (>50ms) the
+// event loop dequeues honest 20Hz inputs in clumps that trip the burst window
+// (the 1000-CCU kick mechanism: 23 honest kicks on the most pressured shard).
+// Those clumps are server-side queueing, not client abuse, so for a short
+// window after every slow tick (or scheduler skip/catch-up) burst trips drop
+// without striking — the same lossy-backpressure contract as the rate path.
+// Strikes still accrue on healthy ticks, so a real flood is kicked as before.
+// Window (500ms) covers the catch-up drain after a stall; under saturation
+// slow ticks recur faster than it lapses, which is exactly when kicks would
+// be unreliable.
+const SLOW_TICK_EXEMPT_MS = 500;
+let slowTickUntilMs = 0;
 
 const drain = new DrainController({
   log: opsLog,
@@ -800,7 +813,9 @@ wss.on('connection', (ws) => {
         // Burst first: counts EVERY input (floods strike here even when the
         // per-gap rate check below would also drop them). Rate second: pure
         // lossy backpressure (drop, no strike — see checkInputRate note).
-        if (!anticheat.checkInputBurst(pid, sim.tick, nowMs)) {
+        // Slow-tick window: clumps dequeued after a stalled tick drop WITHOUT
+        // striking (server-side queueing, not abuse — see slowTickUntilMs).
+        if (!anticheat.checkInputBurst(pid, sim.tick, nowMs, nowMs <= slowTickUntilMs)) {
           metrics.incReject('burst');
           if (anticheat.shouldKick(pid)) {
             kickPlayer(pid, ws, 'shadowban');
@@ -1264,6 +1279,9 @@ function tickOnce(): void {
   });
   // PERF: cumulative tick histogram + rate-limited slow-tick log (>50ms).
   perf.record(sim.tick, totalMs, { sim: sSim, gameplay: sGame, npc: sNpc, snapshot: sSnap, db: sDb }, sockets.size);
+  // ANTICHEAT: a slow tick stalls the event loop, so the inputs it delayed
+  // arrive as a clump — exempt the catch-up window from burst strikes.
+  if (totalMs >= SLOW_TICK_MS) slowTickUntilMs = Date.now() + SLOW_TICK_EXEMPT_MS;
   // Shard load heartbeat for matchmaking + /healthz.
   shardNode.setLoad(sockets.size, totalMs);
   shards.setLocalTickMs(totalMs);
@@ -1277,7 +1295,15 @@ function tickOnce(): void {
 tickScheduler = new TickScheduler(tickOnce, {
   periodMs: 1000 / TICK_HZ,
   maxCatchUp: 2,
-  onSkip: (n) => metrics.noteSkipped(n),
-  onCatchUp: (n) => metrics.noteCatchUp(n),
+  onSkip: (n) => {
+    metrics.noteSkipped(n);
+    // Deep lag drops whole periods: the next inputs are a catch-up clump.
+    slowTickUntilMs = Date.now() + SLOW_TICK_EXEMPT_MS;
+  },
+  onCatchUp: (n) => {
+    metrics.noteCatchUp(n);
+    // Catch-up steps mean the loop was behind: same clump risk as a slow tick.
+    slowTickUntilMs = Date.now() + SLOW_TICK_EXEMPT_MS;
+  },
 });
 tickScheduler.start();

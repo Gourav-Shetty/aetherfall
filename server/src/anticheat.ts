@@ -122,16 +122,22 @@ export class AntiCheat {
    * On trip the window is CLEARED so one queueing stall costs at most one
    * strike (honest 20Hz rebuilds slowly); a real flood re-fills instantly and
    * strikes again within the same millisecond.
+   * Slow-tick exemption: when `slowTick` is true (the tick loop just stalled —
+   * see perf.ts SLOW_TICK_MS), the trip is server-side queueing, not client
+   * abuse: the input is still dropped (lossy backpressure, same as the rate
+   * path) but NO strike accrues. Strikes only count on healthy ticks, so a
+   * real flood is still kicked (3 trips on healthy ticks) while a saturated
+   * event loop dequeuing honest 20Hz inputs in clumps can never kick.
    */
-  checkInputBurst(playerId: number, tick: number, now = Date.now()): boolean {
+  checkInputBurst(playerId: number, tick: number, now = Date.now(), slowTick = false): boolean {
     const win = this.opts.burstWindowMs;
     const arr = this.inputBurstAt.get(playerId) ?? [];
     arr.push(now);
     while (arr.length > 0 && now - arr[0] > win) arr.shift();
     if (arr.length > this.opts.burstMaxInputs) {
-      this.log(playerId, 'burst', tick, `${arr.length} inputs in ${win}ms > max=${this.opts.burstMaxInputs}`);
+      this.log(playerId, 'burst', tick, `${arr.length} inputs in ${win}ms > max=${this.opts.burstMaxInputs}${slowTick ? ' (slow-tick, no strike)' : ''}`);
       this.inputBurstAt.set(playerId, []);
-      this.addStrike(playerId, tick, 'input burst');
+      if (!slowTick) this.addStrike(playerId, tick, 'input burst');
       return false;
     }
     this.inputBurstAt.set(playerId, arr);

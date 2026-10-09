@@ -73,4 +73,40 @@ describe('anticheat', () => {
     assert.equal(ac.violationsFor(7).length, 10); // all recorded
     assert.equal(warns, 1); // ...but logged once
   });
+
+  it('clumped inputs during a flagged slow tick drop without striking', () => {
+    // Slow-tick catch-up window (saturated event loop dequeues honest 20Hz
+    // inputs as a clump): the burst trip must still DROP (backpressure) but
+    // accrue zero strikes, so honest bots are never kicked for server lag.
+    const ac = new AntiCheat({ burstWindowMs: 200, burstMaxInputs: 20 });
+    const t = 1_000_000;
+    let dropped = 0;
+    for (let i = 0; i < 30; i++) {
+      if (!ac.checkInputBurst(1, i, t, true)) dropped++;
+    }
+    assert.ok(dropped > 0, 'clump still dropped (backpressure)');
+    assert.equal(ac.getStrikes(1), 0);
+    assert.equal(ac.shouldKick(1), false);
+    assert.equal(ac.isShadowBanned(1), false);
+    // Repeat the stall many times: exemptions never accumulate into a kick.
+    for (let round = 0; round < 10; round++) {
+      for (let i = 0; i < 30; i++) ac.checkInputBurst(1, 100 + round * 30 + i, t + round * 1000, true);
+    }
+    assert.equal(ac.getStrikes(1), 0);
+    assert.equal(ac.shouldKick(1), false);
+  });
+
+  it('same clump on healthy ticks strikes to kick (real floods contained)', () => {
+    // Identical traffic with slowTick=false (the default): trips strike, and
+    // 3 strikes inside the decay window kick — the chaos-probe flood contract.
+    const ac = new AntiCheat({ burstWindowMs: 200, burstMaxInputs: 20 });
+    let now = 2_000_000;
+    for (let i = 0; i < 100 && !ac.shouldKick(2); i++) {
+      now += 1;
+      ac.checkInputBurst(2, i, now);
+    }
+    assert.equal(ac.shouldKick(2), true);
+    assert.equal(ac.isShadowBanned(2), true);
+    assert.ok(ac.getStrikes(2) >= 3);
+  });
 });

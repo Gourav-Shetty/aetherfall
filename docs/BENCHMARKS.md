@@ -825,3 +825,36 @@ errors, `samples.csv` shows exactly 1000 concurrent at ts=53 and ts=63,
 and the (since torn-down) live shards showed 200 conns each, json 0,
 binary ~500k+/shard, burst 48/105/169/172/274 + shadowban 84 matching
 `shard-metrics.csv` cell-for-cell.
+
+### Verification — slow-tick burst exemption, 100-bot soak (20s, seed 1337, Win32/Node22)
+
+Fix for the honest-kick mechanism above (`checkInputBurst(..., slowTick)`,
+`SLOW_TICK_EXEMPT_MS = 500` in `server/src/index.ts`, wired to the
+`perf.ts` >50ms slow-tick signal plus scheduler skip/catch-up): burst trips
+inside the catch-up window drop without striking. Fresh single-shard server
+on isolated ports (8481/9490, `SHARDS` unset), `--bots 100 --duration 20
+--seed 1337` with probes ON (`--proto 1` default), `/metrics` lifetime
+counters on the fresh boot (≈ load window + ~3s idle):
+
+| metric | value |
+|---|---|
+| bots connected | **100/100**, 0 errors, 0 kicked (`report.csv`: 100 rows, 0 errors) |
+| connect ms avg / p50 / p95 | 77.6 / 75.0 / 90.0 |
+| snapshots | 19199 total, 954.6/s (9.55/s/bot vs 10Hz nominal) |
+| inputs sent | 29100 total (chats 1674, attacks 2624) |
+| tick drift (per-bot gaps) | total 0, max 0 |
+| tick avg / p50 / p95 / max | 9.12 / 8.02 / **19.70** / 204.96ms (p95 inside the 50ms budget) |
+| slow ticks (>50ms) | 2 / 460 (0.43% — tick 19: 205ms connect-burst `gameplay`; tick 402: 55ms) |
+| tick Hz / drift / skip / catch-up | 19.93 / 0.000 / 14 / 1 |
+| input-rate rejects | 1351 (backpressure drops, no strike by design) |
+| burst rejects | **14** (= the chaos-probe flood's 300/21 trips exactly → **honest burst trips 0**) |
+| speed / teleport / shadowban | **0 / 0 / 0** — honest bots 0 violations, 0 strikes, 0 kicks |
+| strikes gauge / max | 0 / 0 |
+| chaos probe | **PASS** — sent=300 acceptedSeq=1/300 snaps=25, rate-limit ACTIVE (flood fully dropped, 0 strikes — it fell in a slow-tick window, so containment held without a kick, exactly the designed contract) |
+| anticheat probe | **PASS** — moved 0.00u, speed 0.00u/s, CLAMPED |
+
+Unit cover: `server/src/anticheat.test.ts` (+2: slow-tick clump drops with
+0 strikes across 11 repeated stalls and never kicks; identical clump on
+healthy ticks strikes to kick). Full server suite: **596/596 green**.
+The chaos-probe expectation needed no change — it already passes on either
+containment mode (drop-limited or kicked).

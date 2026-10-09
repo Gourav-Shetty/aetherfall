@@ -63,6 +63,17 @@ Threat model, controls, and operator checklist for the authoritative server.
 - Order matters: **burst is checked before rate**, so a real flood strikes
   even when the per-gap check would also drop it, and a queueing stall can
   only ever cost one input (burst window clears on trip, strikes decay 10s).
+- **Slow-tick burst exemption** (`checkInputBurst(..., slowTick)`,
+  `SLOW_TICK_EXEMPT_MS = 500` in `index.ts`): when the tick loop stalls
+  (>50ms slow tick, or a scheduler skip/catch-up), the event loop dequeues
+  honest inputs as a clump that trips the burst window. That trip is
+  server-side queueing, not client abuse: the input is still **dropped**
+  (backpressure, same as the rate path) but accrues **no strike**. Strikes
+  only count on healthy ticks, so a real flood is still kicked (3 trips on
+  healthy ticks → kick) while a saturated loop can never kick honest bots
+  (the 1000-CCU mechanism: 23 honest kicks on the most pressured shard).
+  Containment (drop) is unconditional; only the kick requires healthy ticks —
+  the chaos probe passes either way (rate-limit ACTIVE or SHADOWBAN-KICK).
 - `malformed` violation kind records safely-dropped fuzz traffic (no strike).
 - `safeParseClientMsg()` is the socket entry point: never throws, caps
   payloads at 64KB, clamps move axes to `[-1,1]`, `dt` to `[0,0.25]`, chat to
