@@ -858,3 +858,108 @@ Unit cover: `server/src/anticheat.test.ts` (+2: slow-tick clump drops with
 healthy ticks strikes to kick). Full server suite: **596/596 green**.
 The chaos-probe expectation needed no change — it already passes on either
 containment mode (drop-limited or kicked).
+
+## Results — pooled v2 bot decode: 100-bot before/after (20s, seed 1337, Win32/Node22)
+
+Target: the v2-1000 run showed bot-side ~1.2MB RSS/bot vs ~0.65MB on v1,
+which trips the box RAM guard at 1000 bots. Suspected cause: per-frame
+allocations in the v2 decode path (string tables, entity record objects,
+baseline `Map` clones, dequantized entity copies — all discarded by bots
+that only track the baseline + tick drift).
+
+Method: fresh single-shard server per run on isolated ports (8481/9490,
+`SHARDS` unset), `--bots 100 --duration 20 --seed 1337 --proto 2
+--no-chaos --no-anticheat`, detached server across calls (`Start-Process`,
+per the methods-trap note: `Start-Job` children die with the invoking
+shell). Same box, same night. Per-bot rows: `tools/bots/report-perf-pool-before-100.csv`
+(before), `tools/bots/report-perf-pooled-100.csv` (pooled, plain),
+`tools/bots/report-perf-pool-after-100.csv` (pooled + tuned);
+`tools/bots/report-perf-v1-100.csv` is the same-night v1 reference.
+
+| metric | before (HEAD, plain node) | pooled, plain node | pooled + tuned GC | v1 reference (plain node) |
+|---|---|---|---|---|
+| connected / errors / reconnects / drift | 100/100, 0 / 0 / 0 | 100/100, 0 / 0 / 0 | 100/100, 0 / 0 / 0 | 100/100, 0 / 0 / 0 |
+| snapshots | 18888 total, 9.38/s/bot | 19153 total, 9.50/s/bot | 18885 total, 9.38/s/bot | 29488 total, 9.79/s/bot (30s run) |
+| bot RSS | 98.2MB (**0.982**/bot) | 96.5MB (**0.965**/bot) | **62.7MB (0.627/bot)** | 64.0MB (0.640/bot) |
+| bot heap / ext | — | 39.8 / 3.0MB (peak-sized) | 17.4 / 2.7MB | 14.6 / 4.2MB |
+| pooled-lane share | n/a (classic decode) | 108223/116024 single-pass, 7801 chat/ack skipped | 105489/113490 single-pass, 8001 skipped | n/a (JSON) |
+
+Target **met**: 0.982 → **0.627MB/bot** (−36%), at parity v1 levels (0.640),
+with delivery unchanged (9.38–9.50 vs 9.38 snaps/s/bot, 0 errors, 0 drift).
+Two 30s tuned repros held 0.670/9.74 and 0.672/9.73 with flat RSS traces
+(59→67MB, old-space pinned 9–16MB), so the headline is not GC-timing luck.
+
+### What was pooled (`shared/src/protocol2.ts` decode path only, encode untouched)
+
+`P2SnapshotDecoder`, one instance per bot connection, holding frame scratch
+overwritten index-aligned every frame (same pattern as the server
+`snapshotFrame`/`frameParts` scratch):
+
+- **Decode scratch buffers**: two `P2Reader`s reused via the new additive
+  `reset()` (no reader allocs), one `string[]` table reused across frames
+  (index 0 stays `''`), one `P2EntityUpdate[]` record pool + one `number[]`
+  removed pool handed to the message by reference (length-managed, no
+  per-frame array alloc).
+- **Entity record objects**: `readPooledRecord` overwrites the pooled slot
+  (`p`/`v` sub-objects reused when a record carries them on consecutive
+  frames; absent optionals `delete`d so pooled content has exactly the
+  classic own-keys). Steady state allocates zero records.
+- **String-intern table, capped**: decode strings intern through a
+  `P2_MAX_STRINGS` cache (cleared on overflow, same policy as the encoder
+  utf-8 memo) — but **only for snapshot tables** (repeating entity names).
+  Chat/event tables carry one-shot text; interning those pinned every
+  distinct kill payload in every bot (found via a 73→105MB/30s slope with
+  flat heap — fixed before measuring).
+- **Baseline in place**: `applySnapshotInPlace` mutates the receiver `Map`
+  (field writes into the stored `P2Quant`, keyframe sweep via a reused id
+  set) and never builds the dequantized entities map the bots discard. Same
+  `need-keyframe` acceptance as `applySnapshot`, which is untouched (the
+  client render path in `client/src/net2.ts` still uses it).
+- **Single-decode dispatch**: `decodeServerFrame` on the decoder runs one
+  framing pass for every binary type (the classic path runs `decodeFrame`
+  twice per message). Welcome/chat/event/ack bodies mirror the classic
+  validators exactly; only snapshot records come from pool scratch.
+
+`tools/bots/src/index.ts` (receive path only): the binary lane routes every
+frame through one per-bot decoder (`decodeServerFrame` + `applySnapshotInPlace`);
+chat/ack frames — whose content the swarm never reads — are counted and
+released without a decode (observably identical to decode-then-ignore).
+Send path and `encodeInputBinary` untouched. Additive diagnostics only:
+`pooledLane` counters, heap/ext on the memory line, `BOT_MEMLOG=1` gated
+5s sampler (rss/heap/ext + v8 space sizes).
+
+Content contract: pooled decode carries exactly the classic values (same
+validation, same errors), so re-encoding a pooled message is byte-identical.
+Covered by `shared/src/protocol2.pool.test.ts` (11 tests: classic-parity
+over keyframe/delta/removal/unknown-id streams, scratch-identity reuse,
+in-place baseline identity + content over 120 ticks, keyframe sweep,
+need-keyframe parity, intern cap + no-retention of one-shot text,
+malformed parity, dispatch parity for all five server frame types, reset)
+and `tools/bots/src/decode.test.ts` (routing + frame-for-frame receive
+parity incl. `Buffer` input, cleared-name marker, keyframe replacement).
+
+### Why pooling alone only bought −0.02, and what bought the other −0.34
+
+Honest split, same soak: pooling 0.982 → 0.965; runtime tuning
+(`NODE_OPTIONS='--max-semi-space-size=2 --max-old-space-size=48'`) →
+0.627. Heap-space sampling (`BOT_MEMLOG=1`) showed why: live old-space
+settles ~10–12MB, but 7k small binary messages/s keep 10MB of garbage
+between scavenges, V8 sizes old-space to a ~30–43MB high-water mark, and
+RSS never returns the pages. v1's fewer-but-bigger JSON strings go to the
+large-object space and free cheaply; v2's small-message churn promotes
+through new-space instead. The flags trade frequent sub-ms scavenges for a
+pinned heap (delivery held: 9.38–9.74 snaps/s/bot, 0 drift either way), and
+are documented here as the scale-run invocation, not baked into the
+default `start` script (a 48MB old-space cap would be the wrong default for
+200-bot processes). Remaining coder-side churn is content-necessary
+(per-event JSON payload strings) plus the send path (`encodeInputBinary`
+writers per input — deliberately untouched: shared encode is out of scope
+and `ws` retains send buffers until flush, so writer reuse would need
+completion-callback plumbing).
+
+Methods traps hit (one discarded run): a 100-bot attempt showed every bot
+`ws-error` + 5 refused reconnects with no server crash in the logs — the
+known box-pressure-kill signature (same as the discarded v1 attempt in the
+v1-vs-v2 section). Its CSV was discarded, not committed; the rerun on a
+fresh server went 100/100 clean. `PID` is read-only in PowerShell — use
+another variable name for server pids.

@@ -3,13 +3,18 @@ import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { dirname, resolve, basename } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawn } from 'node:child_process';
+import { getHeapSpaceStatistics } from 'node:v8';
 import { mulberry32, type ServerMsg } from '@aetherfall/shared';
 import {
-  applySnapshot,
   baselineFromEntities,
   encodeInputBinary,
-  safeDecodeServerFrame,
+  P2_MAGIC,
+  P2SnapshotDecoder,
+  PROTO2_VERSION,
+  P2Type,
+  type P2ApplyInPlaceResult,
   type P2Baseline,
+  type P2ServerFrame,
 } from '@aetherfall/shared/dist/protocol2.js';
 // TERRAIN: water and lava are solid + damaging on the server, so the
 // swarm steers around hazardAt() tiles instead of drowning on its waypoints.
@@ -238,10 +243,43 @@ export type BotMetrics = {
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Opt-in RSS sampler (`BOT_MEMLOG=1`): logs process rss/heap/ext every 5s so
+ * soak runs can attribute memory slope without a profiler attached.
+ */
+if (process.env.BOT_MEMLOG === '1') {
+  const t0 = Date.now();
+  setInterval(() => {
+    const mu = process.memoryUsage();
+    const mb = (v: number): string => (v / 1024 / 1024).toFixed(1);
+    let spaces = '';
+    try {
+      spaces =
+        ' ' +
+        getHeapSpaceStatistics()
+          .map((s) => `${s.space_name}=${mb(s.space_used_size)}MB`)
+          .join(' ');
+    } catch {
+      /* v8 stats unavailable */
+    }
+    console.log(
+      `[bots-memlog] t=${((Date.now() - t0) / 1000).toFixed(0)}s rss=${mb(mu.rss)}MB heap=${mb(mu.heapUsed)}MB ext=${mb(mu.external + mu.arrayBuffers)}MB${spaces}`,
+    );
+  }, 5000).unref?.();
+}
+
 const CHAT_LINES = [
   'gg', 'lfg', 'anyone at spawn?', 'lag?', 'nice', 'watch out east',
   'heal pls', 'push mid', 'brb', 'wp', 'need backup', 'lol',
 ];
+
+/**
+ * Pooled-lane hit counters (module scope, reported in `summarize`):
+ * `pooled` = snapshot frames decoded into reused scratch + applied in
+ * place, `classic` = binary frames that fell through to the allocating
+ * decode. Steady state should be ~100% pooled.
+ */
+export const pooledLane = { pooled: 0, classic: 0, skipped: 0 };
 
 export async function runBot(
   i: number,
@@ -267,12 +305,18 @@ export async function runBot(
   if (i >= 5) await sleep(Math.floor(i / 5));
   const deadline = Date.now() + durationSec * 1000;
   let attempt = 0;
-  // Redirect follow: sticky/overflow routing sends {t:event,kind:redirect,
+  // Redirect follow: sticky/overflow routing sends {t:event,kind=redirect,
   // payload:{url,shard}} then closes. Reconnect to the new URL with the SAME
   // name (preserves identity) and count it separately from reconnects.
   // Redirects never consume the reconnect budget and use no backoff.
   let targetServer = server;
   const MAX_REDIRECTS = 10;
+  // PERF (v2 decode pooling): one pooled snapshot decoder per bot, reused
+  // across every frame and reconnect. Snapshot scratch (readers, string
+  // table, entity records) is overwritten index-aligned per frame and the
+  // baseline map is mutated in place, so the steady-state receive path
+  // allocates nothing per snapshot (see P2SnapshotDecoder).
+  const decoder = new P2SnapshotDecoder();
 
   // Reconnect loop with exponential backoff (200ms * 2^attempt + jitter, cap 2s,
   // max 5 reconnects). Honest bots should see 0 reconnects; anything higher
@@ -408,9 +452,29 @@ export async function runBot(
         // ---- binary lane (proto:2 negotiated) ----
         if (isBinary) {
           m.binaryFrames++;
-          const head = safeDecodeServerFrame(raw, baseline);
-          if (!head.ok) return;
-          const bmsg = head.value;
+          // Fast drop: the swarm never reads chat/ack content (no branch
+          // below consumes them), so they are counted and released without a
+          // decode — observably identical to decode-then-ignore, minus the
+          // per-frame table decode. Welcome/event/snapshot still decode.
+          if (
+            raw.length >= 5 &&
+            raw[0] === P2_MAGIC &&
+            raw[1] === PROTO2_VERSION &&
+            (raw[2] === P2Type.Chat || raw[2] === P2Type.Ack)
+          ) {
+            pooledLane.skipped++;
+            return;
+          }
+          // Single-decode pooled dispatch: one framing pass per message.
+          // Snapshot records come from reused decoder scratch and apply
+          // into the baseline in place (no per-frame Maps / entity copies).
+          let bmsg: P2ServerFrame;
+          try {
+            bmsg = decoder.decodeServerFrame(raw, baseline);
+          } catch {
+            return;
+          }
+          pooledLane.pooled++;
           if (bmsg.t === 'welcome') {
             upgraded = true;
             m.proto = 2;
@@ -432,9 +496,13 @@ export async function runBot(
               if (gap > m.maxTickGap) m.maxTickGap = gap;
             }
             lastTick = bmsg.tick;
-            const applied = applySnapshot(bmsg, baseline, baseTick);
+            let applied: P2ApplyInPlaceResult;
+            try {
+              applied = decoder.applySnapshotInPlace(bmsg, baseline, baseTick);
+            } catch {
+              return;
+            }
             if (!applied.ok) return; // drift: wait for the next keyframe
-            baseline = applied.baseline;
             baseTick = applied.baseTick;
             return;
           }
@@ -714,7 +782,10 @@ export function summarize(rows: BotMetrics[], wallMs: number): void {
   const drops = rows.filter((r) => r.disconnected).length;
   const errs = rows.filter((r) => r.error).length;
   const profCount = (p: BotProfile): number => rows.filter((r) => r.profile === p).length;
-  const rssMb = process.memoryUsage().rss / 1024 / 1024;
+  const mu = process.memoryUsage();
+  const rssMb = mu.rss / 1024 / 1024;
+  const heapMb = mu.heapUsed / 1024 / 1024;
+  const extMb = (mu.external + mu.arrayBuffers) / 1024 / 1024;
   const wallS = Math.max(0.001, wallMs / 1000);
   const perBot = Math.max(1, ok.length);
   console.log('--- swarm summary ---');
@@ -726,8 +797,9 @@ export function summarize(rows: BotMetrics[], wallMs: number): void {
   console.log(`inputs sent: total=${totInputs} rate=${(totInputs / wallS).toFixed(1)}/s chats=${totChats} attacks=${totAttacks}`);
   console.log(`tick drift: totalGaps=${totGaps} maxGap=${maxGap} ticks (gap = missed 20Hz sim ticks between snapshots)`);
   console.log(`wire: proto mix v1=${rows.length - v2bots} v2=${v2bots} bytesDown=${totBytes} rate=${(totBytes / wallS).toFixed(0)}B/s (≈${(totBytes / perBot / wallS).toFixed(0)}B/s/bot) binaryFrames=${totBin}`);
+  console.log(`pooled decode: pooled=${pooledLane.pooled} classic=${pooledLane.classic} skipped=${pooledLane.skipped} (chat/ack content is never read by the swarm)`);
   console.log(`terrain: hazardAvoidTicks=${totAvoid} hazardWaypoints=${totHazardWp} maxDpsSeen=${maxDps.toFixed(1)}`);
-  console.log(`memory: rss=${rssMb.toFixed(1)}MB total (${(rssMb / Math.max(1, rows.length)).toFixed(3)}MB/bot this process)`);
+  console.log(`memory: rss=${rssMb.toFixed(1)}MB heap=${heapMb.toFixed(1)}MB ext=${extMb.toFixed(1)}MB total (${(rssMb / Math.max(1, rows.length)).toFixed(3)}MB/bot this process)`);
 }
 
 export function writeCsv(rows: BotMetrics[], path: string): void {

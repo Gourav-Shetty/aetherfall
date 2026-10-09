@@ -382,12 +382,23 @@ export class P2Writer {
 
 /** Bounds-checked reader. Every overrun throws P2DecodeError. */
 export class P2Reader {
-  readonly b: Uint8Array;
+  b: Uint8Array;
   pos: number;
 
   constructor(b: Uint8Array, pos = 0) {
     this.b = b;
     this.pos = pos;
+  }
+
+  /**
+   * Reuse this reader for another buffer (pooled decode scratch — the
+   * bot-side `P2SnapshotDecoder` holds two of these across frames instead of
+   * allocating two readers per snapshot).
+   */
+  reset(b: Uint8Array, pos = 0): this {
+    this.b = b;
+    this.pos = pos;
+    return this;
   }
 
   get remaining(): number {
@@ -1891,4 +1902,488 @@ export function safeDecodeServerFrame(bytes: Uint8Array, baseline?: P2Baseline):
 
 export function safeDecodeClientFrame(bytes: Uint8Array): P2DecodeResult<P2ClientFrame> {
   return safeDecode(() => decodeClientFrame(bytes));
+}
+
+/* ------------------------------------------------------------------ *
+ * pooled bot-side decode (allocation-free steady state)
+ * ------------------------------------------------------------------ *
+ * The classic decode path above allocates per snapshot frame: a string
+ * table, a `removed` array, one `P2EntityUpdate` (+`p`/`v` objects) per
+ * entity record, and — in `applySnapshot` — a full baseline `Map` clone, a
+ * dequantized entities `Map`, and one `P2Entity` (+`p`/`v`) per visible
+ * entity. At 100 bots x 10Hz that is ~300k small objects/s the bot process
+ * never even reads (it only tracks the baseline + tick drift), which is what
+ * showed up as ~1.2MB RSS/bot on the v2 wire vs ~0.65MB on v1.
+ *
+ * `P2SnapshotDecoder` is one instance per connection, holding frame scratch
+ * that is overwritten index-aligned every frame (same pattern as the
+ * server's `snapshotFrame`/`frameParts` scratch):
+ *
+ * - two `P2Reader`s reused via `reset()` (no reader allocs per frame),
+ * - one `string[]` string table reused across frames (index 0 stays ''),
+ * - one `P2EntityUpdate[]` record pool + one `number[]` removed pool,
+ *   overwritten index-aligned (`p`/`v` sub-objects reused when a record
+ *   carries them on consecutive frames),
+ * - a capped decode string-intern cache (`P2_MAX_STRINGS`, cleared on
+ *   overflow like the encoder utf-8 memo) so a repeated name resolves to one
+ *   shared string identity instead of one instance per frame,
+ * - `applySnapshotInPlace` mutates the receiver baseline `Map` (field
+ *   writes into the stored `P2Quant`, no clone) and never builds the
+ *   dequantized entities map the bots discard.
+ *
+ * Content contract: pooled decode carries exactly the values the classic
+ * path produces (same validation, same errors, same wire order), so
+ * re-encoding a pooled message is byte-identical to re-encoding the classic
+ * decode. The classic functions above are untouched — only this section and
+ * the additive `P2Reader.reset` are new. The returned `P2Snapshot` is only
+ * valid until the next `decodeSnapshot` call on the same instance.
+ */
+
+export type P2ApplyInPlaceOk = {
+  ok: true;
+  /** Frame tick (== the baseline tick the next delta must build on). */
+  baseTick: number;
+  tick: number;
+};
+export type P2ApplyInPlaceResult = P2ApplyInPlaceOk | P2ApplyErr;
+
+/** True when the raw bytes look like a v2 snapshot frame (routing peek). */
+export function isPooledSnapshotCandidate(bytes: Uint8Array): boolean {
+  return bytes.length >= 5 && bytes[0] === P2_MAGIC && bytes[1] === PROTO2_VERSION && bytes[2] === P2Type.Snapshot;
+}
+
+function internDecodeString(cache: Map<string, string>, s: string): string {
+  const hit = cache.get(s);
+  if (hit !== undefined) return hit;
+  // Bound the memo: chat text and entity names are attacker-influenced, so an
+  // unbounded cache would be a memory leak by design. Clearing (not LRU)
+  // matches the encoder-side utf-8 memo policy.
+  if (cache.size >= P2_MAX_STRINGS) cache.clear();
+  cache.set(s, s);
+  return s;
+}
+
+function readPooledStr(table: string[], idx: number, what: string): string {
+  if (idx >= table.length) throw new P2DecodeError(`bad string index for ${what}`);
+  return table[idx]!;
+}
+
+/**
+ * Overwrite `out` with one entity record (same wire order, same validation,
+ * same resolved values as `readEntityRecord`). Absent optionals are deleted
+ * so the pooled record has exactly the own-keys the classic path produces.
+ */
+function readPooledRecord(r: P2Reader, table: string[], out: P2EntityUpdate, prev?: P2Quant): void {
+  const id = checkU32(r.varint(), 'entity id');
+  const quick = r.u8();
+  const ext = quick & P2_QUICK.EXT ? r.u8() : 0;
+  out.id = id;
+  if (quick & P2_QUICK.POS) {
+    // wire order: x then y
+    const dx = r.svarint();
+    const dy = r.svarint();
+    let p = out.p;
+    if (p === undefined) {
+      p = { x: 0, y: 0 };
+      out.p = p;
+    }
+    p.x = (prev ? prev.qx + dx : dx) / P2_POS_SCALE;
+    p.y = (prev ? prev.qy + dy : dy) / P2_POS_SCALE;
+  } else {
+    delete out.p;
+  }
+  if (quick & P2_QUICK.VEL) {
+    const dx = r.svarint();
+    const dy = r.svarint();
+    let v = out.v;
+    if (v === undefined) {
+      v = { x: 0, y: 0 };
+      out.v = v;
+    }
+    v.x = (prev ? prev.qvx + dx : dx) / P2_VEL_SCALE;
+    v.y = (prev ? prev.qvy + dy : dy) / P2_VEL_SCALE;
+  } else {
+    delete out.v;
+  }
+  if (quick & P2_QUICK.HP) {
+    const hp = prev ? prev.hp + r.svarint() : r.svarint();
+    if (hp < 0 || hp > P2_MAX_HP) throw new P2DecodeError('hp out of range');
+    out.hp = hp;
+  } else {
+    delete out.hp;
+  }
+  if (ext & P2_EXT.MAXHP) {
+    const maxHp = prev ? prev.maxHp + r.svarint() : r.svarint();
+    if (maxHp < 0 || maxHp > P2_MAX_HP) throw new P2DecodeError('maxHp out of range');
+    out.maxHp = maxHp;
+  } else {
+    delete out.maxHp;
+  }
+  if (ext & P2_EXT.DIR) {
+    const d = r.svarint();
+    out.dir = (prev && prev.qdir !== null ? prev.qdir + d : d) / P2_DIR_SCALE;
+  } else {
+    delete out.dir;
+  }
+  if (ext & P2_EXT.LEVEL) {
+    const d = r.svarint();
+    out.level = prev && prev.level !== null ? prev.level + d : d;
+  } else {
+    delete out.level;
+  }
+  // name is always an absolute table index (0 = cleared), never a delta
+  if (ext & P2_EXT.NAME) out.name = readPooledStr(table, r.varint(), 'entity name');
+  else delete out.name;
+  if (ext & P2_EXT.SEQ) {
+    const d = r.svarint();
+    out.seq = prev && prev.seq !== null ? prev.seq + d : d;
+  } else {
+    delete out.seq;
+  }
+  if (ext & P2_EXT.KIND) out.kind = P2_KINDS[checkKind(r.u8())]!;
+  else delete out.kind;
+}
+
+/**
+ * Merge a decoded update into the stored baseline entry in place (same
+ * values `applySnapshot` computes via `quantizePatch` + spread, but without
+ * the intermediate patch object). Throws the same `P2EncodeError`s on
+ * out-of-domain values.
+ */
+function mergePooledUpdateInto(prev: P2Quant, u: P2EntityUpdate): void {
+  if (!Number.isInteger(u.id) || u.id < 0) throw new P2EncodeError('entity id must be a non-negative integer');
+  if (u.kind !== undefined) {
+    const code = P2_KINDS.indexOf(u.kind);
+    if (code < 0) throw new P2EncodeError(`unknown entity kind ${String(u.kind)}`);
+    prev.code = code;
+  }
+  if (u.p !== undefined) {
+    prev.qx = q(u.p.x, P2_POS_SCALE, Q_LIMIT_POS, 'p.x');
+    prev.qy = q(u.p.y, P2_POS_SCALE, Q_LIMIT_POS, 'p.y');
+  }
+  if (u.v !== undefined) {
+    prev.qvx = q(u.v.x, P2_VEL_SCALE, Q_LIMIT_VEL, 'v.x');
+    prev.qvy = q(u.v.y, P2_VEL_SCALE, Q_LIMIT_VEL, 'v.y');
+  }
+  if (u.hp !== undefined) prev.hp = qHp(u.hp);
+  if (u.maxHp !== undefined) prev.maxHp = qHp(u.maxHp);
+  if (u.dir !== undefined) prev.qdir = q(u.dir, P2_DIR_SCALE, Q_LIMIT_DIR, 'dir');
+  if (u.level !== undefined) prev.level = clampInt(u.level, Q_LIMIT_LEVEL, 'level');
+  // An empty name keeps the baseline name: deltas cannot clear a field (the
+  // encoder promotes those frames to keyframes instead).
+  if (u.name !== undefined && u.name !== '') prev.name = u.name;
+  if (u.seq !== undefined) prev.seq = clampInt(u.seq, Q_LIMIT_SEQ, 'seq');
+}
+
+function pooledRecordIsComplete(u: P2EntityUpdate): boolean {
+  return u.kind !== undefined && u.p !== undefined && u.v !== undefined && u.hp !== undefined && u.maxHp !== undefined;
+}
+
+/** One per connection. Holds frame scratch reused across snapshots. */
+export class P2SnapshotDecoder {
+  private readonly head = new P2Reader(new Uint8Array(0));
+  private readonly body = new P2Reader(new Uint8Array(0));
+  private readonly table: string[] = [''];
+  private readonly intern = new Map<string, string>();
+  private readonly entities: P2EntityUpdate[] = [];
+  private readonly removed: number[] = [];
+  private readonly frameIds = new Set<number>();
+  /** The last decoded snapshot (pooled — overwritten by the next decode). */
+  private readonly msg: P2Snapshot = { t: 'snapshot', tick: 0, baseTick: 0, keyframe: false, entities: [], removed: [] };
+
+  /** Forget cached string identities and drop pooled capacity. */
+  reset(): this {
+    this.intern.clear();
+    this.table.length = 1;
+    this.entities.length = 0;
+    this.removed.length = 0;
+    this.frameIds.clear();
+    return this;
+  }
+
+  /** Interned string identities currently cached (bounded by P2_MAX_STRINGS). */
+  get internSize(): number {
+    return this.intern.size;
+  }
+
+  /**
+   * Decode a snapshot frame into reused scratch. The returned message (its
+   * `entities`/`removed` arrays and every record in them) is only valid
+   * until the next decode call on this instance — apply or copy
+   * first. Values are identical to `decodeSnapshotBinary`.
+   */
+  decodeSnapshot(bytes: Uint8Array, baseline?: P2Baseline): P2Snapshot {
+    const f = this.openFrame(bytes, true);
+    if (f.type !== P2Type.Snapshot) throw new P2DecodeError(`expected msg type ${P2Type.Snapshot}, got ${f.type}`);
+    return this.readSnapshotBody(f, baseline);
+  }
+
+  /**
+   * Single-decode server-frame dispatch (the classic `decodeServerFrame`
+   * re-runs `decodeFrame` inside every specific decoder, so each binary
+   * message pays for two header validations and two string-table decodes).
+   * One framing pass here; snapshot records come from pool scratch (valid
+   * until the next decode on this instance), every other type is a fresh
+   * object with exactly the classic content. Unknown types throw the same
+   * `unknown server msg type` error.
+   */
+  decodeServerFrame(bytes: Uint8Array, baseline?: P2Baseline): P2ServerFrame {
+    // Peek the type first: only snapshot tables repeat (entity names worth
+    // interning); every other table carries one-shot text. The peek reads
+    // validated header bytes, so a short/malformed frame still throws the
+    // same errors out of `openFrame` below.
+    const looksSnapshot = bytes.length >= 5 && bytes[0] === P2_MAGIC && bytes[1] === PROTO2_VERSION && bytes[2] === P2Type.Snapshot;
+    const f = this.openFrame(bytes, looksSnapshot);
+    switch (f.type) {
+      case P2Type.Welcome:
+        return this.readWelcomeBody(f);
+      case P2Type.Snapshot:
+        return this.readSnapshotBody(f, baseline);
+      case P2Type.Chat:
+        return this.readChatBody(f);
+      case P2Type.Event:
+        return this.readEventBody(f);
+      case P2Type.Ack:
+        return this.readAckBody(f);
+      default:
+        throw new P2DecodeError(`unknown server msg type ${f.type}`);
+    }
+  }
+
+  /**
+   * Validate the frame header and decode the string table into reused
+   * scratch (index 0 stays ''). Returns the body reader positioned at the
+   * body start. Both live readers are reused — the body must be consumed
+   * before the next `openFrame` call.
+   *
+   * `internTable` selects decode-string interning: snapshot tables repeat
+   * the same entity names every frame, so sharing one identity per name
+   * kills retention churn. Chat/event tables carry one-shot text (chat
+   * lines, per-kill JSON payloads) that must NOT be retained — interning
+   * those would pin every distinct payload in every connection's cache for
+   * the life of the run, which is exactly the RSS slope this pooling
+   * exists to remove.
+   */
+  private openFrame(
+    bytes: Uint8Array,
+    internTable: boolean,
+  ): { type: number; flags: number; table: string[]; body: P2Reader } {
+    if (!(bytes instanceof Uint8Array)) throw new P2DecodeError('frame must be a Uint8Array');
+    if (bytes.length < 5) throw new P2DecodeError('frame too short');
+    if (bytes[0] !== P2_MAGIC) throw new P2DecodeError('bad magic');
+    if (bytes[1] !== PROTO2_VERSION) throw new P2DecodeError(`unsupported version ${bytes[1]}`);
+    const type = bytes[2]!;
+    const flags = bytes[3]!;
+    const head = this.head.reset(bytes, 4);
+    const len = head.varint();
+    if (len > P2_MAX_FRAME_BYTES) throw new P2DecodeError(`frame too large (${len} > ${P2_MAX_FRAME_BYTES})`);
+    const start = head.pos;
+    if (bytes.length - start !== len) throw new P2DecodeError('declared length does not match payload');
+    // Per-frame string table into the reused list (index 0 stays '').
+    const table = this.table;
+    table.length = 1;
+    const r = this.body.reset(bytes.subarray(start, start + len));
+    const extra = r.varint();
+    if (extra > P2_MAX_STRINGS) throw new P2DecodeError('too many strings');
+    for (let i = 0; i < extra; i++) {
+      const n = r.varint();
+      if (n > P2_MAX_STRING_BYTES) throw new P2DecodeError('string too long');
+      let text: string;
+      try {
+        text = DEC.decode(r.bytes(n));
+      } catch {
+        throw new P2DecodeError('invalid utf-8 in string table');
+      }
+      table.push(internTable ? internDecodeString(this.intern, text) : text);
+    }
+    const bodyLen = r.varint();
+    if (r.remaining !== bodyLen) throw new P2DecodeError('declared body length does not match payload');
+    // `head` is done (only `start` was needed) — reuse it for the body phase
+    // so the two live readers never alias.
+    const body = this.head.reset(bytes.subarray(start + r.pos, start + r.pos + bodyLen));
+    return { type, flags, table, body };
+  }
+
+  /** Snapshot body from an opened frame (pooled records + removed). */
+  private readSnapshotBody(
+    f: { flags: number; table: string[]; body: P2Reader },
+    baseline?: P2Baseline,
+  ): P2Snapshot {
+    const keyframe = (f.flags & P2_FLAG_KEYFRAME) !== 0;
+    const table = f.table;
+    const b = f.body;
+
+    const tick = checkU32(b.varint(), 'snapshot tick');
+    const baseTick = checkU32(b.varint(), 'snapshot baseTick');
+    if (!keyframe && baseTick > tick) throw new P2DecodeError('baseTick must not exceed tick');
+    if (keyframe && baseTick !== 0) throw new P2DecodeError('keyframe must carry baseTick 0');
+    if (!keyframe && !baseline) throw new P2DecodeError('delta frame needs the receiver baseline to decode');
+
+    const removed = this.removed;
+    removed.length = 0;
+    const nRemoved = b.varint();
+    if (nRemoved > P2_MAX_ENTITIES) throw new P2DecodeError('too many removed ids');
+    for (let i = 0; i < nRemoved; i++) removed.push(checkU32(b.varint(), 'removed id'));
+
+    const pool = this.entities;
+    const nEntities = b.varint();
+    if (nEntities > P2_MAX_ENTITIES) throw new P2DecodeError('too many entities in snapshot');
+    // Grow the pool (new slots only — steady state reuses every object).
+    while (pool.length < nEntities) pool.push({ id: -1 });
+    for (let i = 0; i < nEntities; i++) {
+      // Read the id once and resolve against the baseline entry up front
+      // (the classic path peeks + re-reads; same values, one varint).
+      const save = b.pos;
+      const id = b.varint();
+      b.pos = save;
+      readPooledRecord(b, table, pool[i]!, keyframe ? undefined : baseline?.get(id));
+      if (
+        keyframe &&
+        (pool[i]!.kind === undefined ||
+          pool[i]!.p === undefined ||
+          pool[i]!.v === undefined ||
+          pool[i]!.hp === undefined ||
+          pool[i]!.maxHp === undefined)
+      ) {
+        throw new P2DecodeError('keyframe entity record is not complete');
+      }
+    }
+    if (b.remaining !== 0) throw new P2DecodeError('unexpected trailing bytes in body');
+
+    const msg = this.msg;
+    msg.tick = tick;
+    msg.baseTick = baseTick;
+    msg.keyframe = keyframe;
+    // Direct pool reference (length-managed, no per-frame array alloc): the
+    // message borrows decoder scratch until the next decode on this instance.
+    pool.length = nEntities;
+    msg.entities = pool;
+    msg.removed = removed;
+    return msg;
+  }
+
+  /** Welcome body from an opened frame (fresh objects — once per connection). */
+  private readWelcomeBody(f: { table: string[]; body: P2Reader }): P2Welcome {
+    const strings: P2StringTable = { list: f.table };
+    const r = f.body;
+    const id = checkU32(r.varint(), 'welcome id');
+    const tick = checkU32(r.varint(), 'welcome tick');
+    const name = readPooledStr(f.table, r.varint(), 'welcome name');
+    const count = r.varint();
+    if (count > P2_MAX_ENTITIES) throw new P2DecodeError('too many entities in welcome');
+    const snapshot: P2Entity[] = [];
+    for (let i = 0; i < count; i++) {
+      const u = readEntityRecord(r, strings);
+      // welcome records are always complete; anything missing is corrupt.
+      if (u.kind === undefined || u.p === undefined || u.v === undefined || u.hp === undefined || u.maxHp === undefined) {
+        throw new P2DecodeError('welcome entity record is not complete');
+      }
+      snapshot.push(u as P2Entity);
+    }
+    if (r.remaining !== 0) throw new P2DecodeError('unexpected trailing bytes in body');
+    return { t: 'welcome', proto: PROTO2_VERSION, id, tick, name, snapshot };
+  }
+
+  /** Chat body from an opened frame (same content as `decodeChatBinary`). */
+  private readChatBody(f: { table: string[]; body: P2Reader }): P2Chat {
+    const r = f.body;
+    const channel = r.u8();
+    if (channel >= CHANNEL_NAME.length) throw new P2DecodeError(`unknown channel code ${channel}`);
+    const from = readPooledStr(f.table, r.varint(), 'chat from');
+    const text = readPooledStr(f.table, r.varint(), 'chat text');
+    if (r.remaining !== 0) throw new P2DecodeError('unexpected trailing bytes in body');
+    return { t: 'chat', from, text, channel: CHANNEL_NAME[channel]! };
+  }
+
+  /** Event body from an opened frame (same content as `decodeEventBinary`). */
+  private readEventBody(f: { table: string[]; body: P2Reader }): P2Event {
+    const r = f.body;
+    const kind = readPooledStr(f.table, r.varint(), 'event kind');
+    const payload = readPooledStr(f.table, r.varint(), 'event payload');
+    if (r.remaining !== 0) throw new P2DecodeError('unexpected trailing bytes in body');
+    return { t: 'event', kind, payload };
+  }
+
+  /** Ack body from an opened frame (same content as `decodeAckBinary`). */
+  private readAckBody(f: { body: P2Reader }): P2Ack {
+    const r = f.body;
+    const flags = r.u8();
+    if ((flags & ~P2_ACK_RTT) !== 0) throw new P2DecodeError('unknown ack flag bits');
+    const tick = checkU32(r.varint(), 'ack tick');
+    const baseTick = checkU32(r.varint(), 'ack baseTick');
+    if (baseTick > tick) throw new P2DecodeError('baseTick must not exceed tick');
+    const lastInputSeq = checkU32(r.varint(), 'ack lastInputSeq');
+    const msg: P2Ack = { t: 'ack', tick, baseTick, lastInputSeq };
+    if (flags & P2_ACK_RTT) {
+      const rtt = r.svarint();
+      if (rtt < 0) throw new P2DecodeError('rtt must be >= 0');
+      msg.rttMs = rtt;
+    }
+    if (r.remaining !== 0) throw new P2DecodeError('unexpected trailing bytes in body');
+    return msg;
+  }
+
+  /**
+   * Resolve a snapshot frame against the receiver baseline **in place**:
+   * the passed `baseline` map is mutated (entries merged or swept, removals
+   * deleted) and kept — no clone, no dequantized entities map, no
+   * `removed` copy. Same acceptance semantics as `applySnapshot`
+   * (`need-keyframe` when the baseline tick does not line up); callers that
+   * need the full entity view should keep using `applySnapshot`.
+   */
+  applySnapshotInPlace(msg: P2Snapshot, baseline: P2Baseline, baseTick: number): P2ApplyInPlaceResult {
+    if (needsKeyframe(msg, baseTick)) return { ok: false, reason: 'need-keyframe', wantTick: msg.tick };
+    if (msg.keyframe) {
+      const seen = this.frameIds;
+      seen.clear();
+      for (const u of msg.entities) {
+        if (u.kind === undefined || u.p === undefined || u.v === undefined || u.hp === undefined || u.maxHp === undefined) {
+          throw new P2DecodeError(`entity ${u.id}: delta record for an entity with no baseline is incomplete`);
+        }
+        const prev = baseline.get(u.id);
+        if (prev === undefined) {
+          baseline.set(u.id, quantizeEntity(u as P2Entity));
+        } else {
+          // Overwrite every quantized field (a keyframe is absolute state,
+          // including fields the delta path would merge).
+          const qn = quantizeEntity(u as P2Entity);
+          prev.code = qn.code;
+          prev.qx = qn.qx;
+          prev.qy = qn.qy;
+          prev.qvx = qn.qvx;
+          prev.qvy = qn.qvy;
+          prev.hp = qn.hp;
+          prev.maxHp = qn.maxHp;
+          prev.qdir = qn.qdir;
+          prev.level = qn.level;
+          prev.name = qn.name;
+          prev.seq = qn.seq;
+        }
+        seen.add(u.id);
+      }
+      // `removed` wins over entities in the same frame (matches applySnapshot).
+      for (const id of msg.removed) {
+        baseline.delete(id);
+        seen.delete(id);
+      }
+      for (const id of baseline.keys()) {
+        if (!seen.has(id)) baseline.delete(id);
+      }
+      seen.clear();
+    } else {
+      for (const u of msg.entities) {
+        const prev = baseline.get(u.id);
+        if (prev === undefined) {
+          if (!pooledRecordIsComplete(u)) {
+            throw new P2DecodeError(`entity ${u.id}: delta record for an entity with no baseline is incomplete`);
+          }
+          baseline.set(u.id, quantizeEntity(u as P2Entity));
+        } else {
+          mergePooledUpdateInto(prev, u);
+        }
+      }
+      for (const id of msg.removed) baseline.delete(id);
+    }
+    return { ok: true, baseTick: msg.tick, tick: msg.tick };
+  }
 }
