@@ -963,3 +963,162 @@ known box-pressure-kill signature (same as the discarded v1 attempt in the
 v1-vs-v2 section). Its CSV was discarded, not committed; the rerun on a
 fresh server went 100/100 clean. `PID` is read-only in PowerShell — use
 another variable name for server pids.
+
+## Results — wave10: 1000-CCU re-soak after slow-tick exemption + pooled v2 bot decode (2026-10-10, Win32/Node22)
+
+Re-soak of the v2-1000 run above after the two fixes it prescribed:
+slow-tick burst exemption (`c29d3a7`: clumped inputs in catch-up windows
+drop WITHOUT strike) and pooled v2 bot decode + scale-run GC tuning
+(`e3c2780`: 0.98 -> 0.63MB/bot, `NODE_OPTIONS='--max-semi-space-size=2
+--max-old-space-size=48'` on bot procs). Fresh `npm run build
+--workspaces` (exit 0). Layout: 5 shards `8381-8385` / `9390-9394`
+(`SHARD_ID=shard-0..4`, `SHARDS` unset, private cwd per shard, default v2
+wire — no `PROTO` pin), 2 procs x 100 per shard (offsets 0..900,
+`--proto 2 --duration 60 --seed 1337 --no-chaos --no-anticheat`), shard
+starts staggered 3s after a 10s boot stagger. Probes OFF, so every
+anticheat reject below is honest load. Per-shard `/metrics` pre/post
+(`docs/soak-wave10/shard-metrics-1000.csv`, gauges `g_*` = rolling gauges
+under load, `w_*` = pre->post counter deltas) plus one 5s sample under
+full load (`docs/soak-wave10/samples-1000.csv`); per-bot rows
+`tools/bots/report-wave10-1000.csv` (1000 rows, merged from 10 procs).
+
+True-1000 proof: the t=16 sample shows all 5 shards at 200 players
+(200x5 = 1000 in the same scrape).
+
+| shard | tick avg | p50 | p95 gauge / bucket | max | Hz | gameplay / snapshot | snap KB | wire B/p/s | bin ratio | burst / shadowban |
+|---|---|---|---|---|---|---|---|---|---|---|
+| shard-0 | 6.93ms | 11.88 | 73.4 / 77.5 | 116.9ms | 18.20 | 4.42 / 2.14ms | 0.78 | 7003 | 1.000000 | 0 / 0 |
+| shard-1 | 8.19ms | 24.07 | 94.5 / 80.3 | 163.8ms | 15.80 | 5.19 / 2.61ms | 0.81 | 7099 | 1.000000 | 0 / 0 |
+| shard-2 | 8.88ms | 30.46 | 101.6 / 80.6 | 164.4ms | 15.40 | 5.62 / 2.82ms | 0.78 | 6822 | 1.000000 | 46 / 0 |
+| shard-3 | 8.81ms | 31.22 | 106.5 / 80.3 | 198.0ms | 14.60 | 5.63 / 2.78ms | 0.80 | 6867 | 1.000000 | 87 / 0 |
+| shard-4 | 8.11ms | 31.77 | 105.4 / 77.7 | 237.5ms | 14.73 | 5.27 / 2.46ms | 0.79 | 6795 | 1.000000 | 90 / 0 |
+
+Gauges are the rolling values at the t=16 full-load sample (same
+rolling-gauge methodology as the earlier tables); bucket p95 is windowed
+pre->post with idle ticks subtracted (idle rate from pre
+`ticks_total/uptime`, ~19.9Hz x non-load wall). `w_*` rates use a 75s
+union load window (launches t=0..13, 60s runs).
+
+Bot-side (1000 rows): **1000/1000 connected**, connect avg/p50/p95
+478/182/1252ms, snapshots 484664 (**8.08/s/bot**), **tick drift 0,
+reconnects 0, redirects 0**, proto v2 1000/1000, bytesDown 528.2MB,
+binary frames 3105412. Errors: **NONE — 0 honest kicks** (no
+`kicked:shadowban`, no `ws-error`).
+
+Server lifetime (`w_*`): conns 200/200/200/200/200, drift
+-0.06..+0.26, skip 226-247 / catch-up 339-430 per shard, strikes gauge 0
+(max 0), honest speed/teleport/shadowban rejects **0 everywhere**,
+input-rate backpressure drops 95-111k/shard (same designed symptom as
+before). Slow ticks 421-468/shard over the window (~33-36% of load
+ticks, vs 40-57% in the pre-fix v2-1000 run).
+
+RAM: free 1151MB at start -> **floor 248MB** -> 1344MB settled.
+Launch gates all held (1139/983/775/594/431MB, gate >400MB); the 250MB
+floor tripped by 2MB at peak — no OOM, run completed, memory returned
+post-run. Server WS 356MB -> 691MB under load (+335MB); bot fleet
+~568MB total (**~0.57MB/bot**, vs ~1.2MB/bot pre-pooling — the e3c2780
+dividend reproduces at 1000 bots). Peak consumption ~0.9GB for 1000-v2
+vs ~1.9GB before.
+
+### wave10 vs pre-fix v2-1000
+
+| metric | v2-1000 (pre-fix) | wave10 (fixed) | delta |
+|---|---|---|---|
+| connected / drift | 1000/1000, 0 gaps | 1000/1000, 0 gaps | same |
+| honest kicks (`kicked:shadowban`) / reconnects | 23 / 23 | **0 / 0** | exemption works |
+| burst rejects (honest) | 768 | 223, 0 strikes held | -71%, 0 kicks |
+| snaps/s/bot | 6.1-7.0 | **8.0-8.2** | emission tracks nominal again |
+| tick Hz | 12.9-15.6 | 14.6-18.2 | scheduler breathes |
+| per-shard p95 gauge | 86-133ms | 73-106ms | better, still over the 80ms gate |
+| slow ratio (windowed) | 40-57% | ~33-36% | better, still over the 5% gate |
+| bot RAM | ~1.2MB/bot (~1220MB) | **~0.57MB/bot (~568MB)** | pooling + GC tuning hold at scale |
+| free-RAM floor | 303MB | 248MB (2MB under the floor) | fits, but kisses the guard |
+
+Verdict on 1000: **still misses the 80ms p95 gate (4/5 shards over;
+bucket-windowed 78-81 corroborates the miss)**. The honest-kick
+regression is FIXED (0 kicks, 0 reconnects, 0 strikes held at 1000 CCU)
+and delivery is back to near-nominal — but the tick-budget ceiling has
+not moved enough: `gameplay` 4.4-5.6ms + `snapshot` 2.1-2.8ms per tick
+at 200/shard is the same ranking as every prior run.
+
+### wave10b: 800-CCU probe (4x200, same build/flags, 2026-10-10)
+
+Same shards 0-3 rebooted-idle, fresh pre scrapes, 8 procs x 100
+(offsets 0..700), launches spanning ~10s. True-800 held across three 5s
+samples (t=18/38/58 all total exactly 800).
+`docs/soak-wave10/samples-800.csv`,
+`docs/soak-wave10/shard-metrics-800.csv` (gauges below at t=38),
+`tools/bots/report-wave10-800.csv` (800 rows).
+
+| shard | tick avg | p50 | p95 (t=18 / t=38 / t=58) | max | Hz | game / snap | wire B/p/s | burst / shadowban |
+|---|---|---|---|---|---|---|---|---|
+| shard-0 | 7.38ms | 41.11 | 68.5 / 84.1 / 80.8 | 127.7ms | 18.47 | 4.64 / 2.37ms | 9063 | 0 / 0 |
+| shard-1 | 7.83ms | 41.11 | 75.5 / 82.5 / 77.7 | 131.2ms | 19.53 | 4.96 / 2.49ms | 8758 | 0 / 0 |
+| shard-2 | 8.08ms | 41.14 | 79.7 / 82.5 / 82.4 | 122.9ms | 18.67 | 5.12 / 2.56ms | 8627 | 45 / 0 |
+| shard-3 | 7.88ms | 42.25 | 76.8 / 81.9 / 82.9 | 105.0ms | 19.20 | 5.02 / 2.50ms | 8663 | 92 / 0 |
+
+Windowed: snaps 112.8-115.0k/shard at 0.78-0.83KB, wire
+120.8-126.9MB/shard, json 0 / bin ~700k/shard (ratio 1.000000),
+input-rate drops 70-77k/shard, speed/teleport/shadowban 0, slows
+369-386/shard (~27% of load ticks), conns 200x4, drift <=0.22, skip
+53-72 / catch-up 264-285.
+
+Bot-side (800 rows): **800/800 connected**, connect avg/p50/p95
+409/147/1080ms, snapshots 455532 (**9.49/s/bot — nominal**), gaps 0,
+reconnects 0, v2 800/800, bytesDown 499.8MB. Errors: NONE.
+RAM: free 1322MB -> **floor 449MB** (guard never tripped) -> settled
+~1300MB. Server WS peaked ~610MB (138-173MB/shard).
+
+Verdict on 800: **marginal — p95 68-84ms across 12 loaded
+shard-samples, roughly half over the 80ms gate by 1-4ms** (within
+rolling-gauge noise, but a gate is a gate). 800 is the new knee; it is
+NOT certified for p95 <= 80ms on this host.
+
+### Ceiling verdict (this host, Ryzen 5 5600H / 7.36GB)
+
+- **1000: no** (p95 73-106, 4/5 shards over 80).
+- **800: marginal, not certified** (p95 68-84, misses by <=4ms on some shards).
+- **600: stays the certified ceiling** for p95 <= 80ms (prior 3x200
+  measurement p95 71.2 + both fixes strictly reduce pressure; not
+  re-run this wave, and needs no re-run to keep its certificate).
+- Binding constraints in order: (1) tick budget (`gameplay` per-tick
+  spawner/quest work at 200/shard — still the top section everywhere);
+  (2) RAM headroom for 1000-v2 (~0.9GB peak; this box starts ~1.1-1.4GB
+  free, so the run fits but kisses the 250MB floor).
+
+### Methods traps hit during wave10 (read before the next soak)
+
+- Pilot 800: the first attempt sampled `/metrics` between per-shard
+  launches; each sample cost ~10-20s (5 scrapes + CIM fleet scans), so
+  the 8s stagger stretched to ~20s+, the launch span exceeded the 60s
+  bot duration, and peak concurrency was 800, not 1000. Archived in
+  `%TEMP%` only, NOT committed. Fix used for the real runs: launch fast
+  (3s stagger, no sampling in the launch loop), sample only once all
+  procs are in flight.
+- `if ($tot -gt $peak)` with `$tot` polluted by `Write-Output` strings
+  from inside the sampler function aborts the run (`Could not compare`).
+  Keep sampler functions output-clean (`Write-Host` for progress, return
+  only the number) — the wave10 launcher died exactly this way at
+  t=16 with all 1000 bots in flight; a rescue loop recovered sampling
+  (bots are detached and self-timing, so no data was lost).
+- `samples-1000.csv` contains an extra 5-row true-1000 sample at ts=49
+  (200x5, counter-monotonic between the t=16 and post scrapes) whose
+  writer is unidentified — no sampler process was found afterwards and
+  both launcher scripts account for their own rows. Its values are
+  physically consistent (ticks +~500 over 33s at ~16Hz, burst frozen
+  post-connect-storm while input-rate drops advance) and corroborate
+  the t=16 table (p95 96-108 there), but it is NOT used for any
+  headline number; the t=16 sample (certain provenance: launcher poll
+  #1) is the committed loaded snapshot. If it reappears, suspect a
+  retried/duplicate poll, not load.
+- Committed `samples-1000.csv` had its junk first column (stray header
+  + `x,` row prefixes from a botched header line) stripped; bot CSVs
+  are merged sorts by `bot` id. Staging script (TEMP-only):
+  per-shard `w_*` rates use a stated union load window (75s @1000,
+  70s @800), not wall — wall includes ~95-155s of idle/drain tail.
+- Bot RSS at 1000 is estimated from the free-RAM trace
+  (1151 -> 248 = ~903MB consumed minus server WS delta +335MB ->
+  ~568MB / 0.57MB/bot) because no per-proc RSS sampler ran during the
+  overlap; 5s-cadence fleet CIM is too slow to catch the peak and
+  `BOT_MEMLOG=1` was off. Next 1000-run: enable `BOT_MEMLOG=1` or poll
+  `Get-Process` WS by wrapper-child PID each sample.

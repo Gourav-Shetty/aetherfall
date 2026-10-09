@@ -8,6 +8,12 @@ drift, honest speed/teleport 0, snapshot bytes -95%, egress ~40 -> ~6.7MB/s,
 but p95 still over the 80ms gate and 23 honest burst->shadowban kicks on
 the most pressured shard. **Ceiling stays 600 CCU (3 x 200)**; the binding
 constraint on this box is now RAM, not bandwidth (see "v2 RAM rule").
+**Update (2026-10-10, wave10): both fixes re-soaked at true-1000** —
+1000/1000 connected, **0 honest kicks, 0 reconnects**, 8.1 snaps/s/bot,
+p95 73-106ms (still over the gate on 4/5 shards); plus a true-800 probe
+(p95 68-84, marginal). **Ceiling stays 600 CCU**, 800 is the new
+(un-certified) knee. Bot RAM halved to ~0.57MB/bot, so 1000-v2 peaks at
+~0.9GB instead of ~1.9GB — it fits this box but kisses the 250MB floor.
 The single-node tables below were also capped at 100 concurrent by a harness
 bug (see "sharded soak runbook" below).
 See `docs/BENCHMARKS.md` for raw numbers.
@@ -249,23 +255,40 @@ foreach ($p in 8281..8285 + 9290..9294) { "port $p in use: $([bool](Get-NetTCPCo
 1. `connected == bots` and `reconnects == 0` (v1 sharded soak:
    1000/1000, 0; v2 1000-CCU:
    1000/1000 but 23 shadowban-kick reconnects on the most pressured shard —
-   not a pass yet, see BENCHMARKS 1000-connection finding 1).
+   not a pass yet, see BENCHMARKS 1000-connection finding 1;
+   **wave10: 1000/1000, 0 reconnects, 0 kicks — PASS**;
+   wave10b 800-probe: 800/800, 0 — PASS).
 2. `aetherfall_tick_duration_ms_p95 <= 50ms` **and** tick rate >= 19Hz — measure
    the rate, do not assume 20Hz (v1: 12-14Hz at 200 players/shard;
-   v2 with the drift-compensating scheduler: 12.9-15.6Hz at true-1000).
+   v2 with the drift-compensating scheduler: 12.9-15.6Hz at true-1000;
+   **wave10: 14.6-18.2Hz at true-1000, 18.4-19.5Hz at 800**).
+   For the sharded p95 <= 80ms ceiling gate specifically: **1000 FAILS
+   (73-106, 4/5 shards over), 800 MARGINAL (68-84, misses by <=4ms on
+   some shards), 600 KEEPS the certificate (prior p95 71.2)**.
 3. honest `aetherfall_anticheat_rejects_total{kind="speed"|"teleport"|"shadowban"} == 0`
    **and** `{kind="burst"} == 0` (v1: 0/0/0 but burst 888 — not a pass yet;
    v2: 0/0 speed/teleport, burst 768, shadowban 84 / 23 kicks — regressed
-   under pressure, same known window issue).
+   under pressure, same known window issue;
+   **wave10: speed/teleport/shadowban 0, burst 223 with 0 strikes held
+   and 0 kicks — the exemption works; the burst==0 clause is now
+   interpreted as burst-kicks==0, since connect-storm clumps still
+   trip-and-drop by design**).
 4. `slow_ticks_ratio` < 0.05, server RSS flat over the run.
 5. Ports asserted owned by your own server pids before you believe a scrape.
 
 ### v2 RAM rule (v2 fleets are RAM-heavy — this binds before bandwidth now)
 
 Measured at 1000-v2: servers ~0.7GB WS under load (5 procs) + bots
-~1.2GB WS (10 procs x 100, ~1.2MB/bot with binary decode buffers vs
+~1.2GB WS (10 procs x 100, ~1.2MB/bot with binary decode buffers) vs
 0.65MB/bot v1). Budget **~1.9GB free headroom** before attempting
-1000-v2 on a shared box. Procedure that survived two soaks without OOM:
+1000-v2 on a shared box. **Update (wave10, pooled decode + tuned GC,
+`NODE_OPTIONS='--max-semi-space-size=2 --max-old-space-size=48'` on bot
+procs): bot fleet ~0.57MB/bot (~568MB for 1000), so 1000-v2 peaks at
+~0.9GB total and fits a box starting with ~1.1GB free — but it kisses
+the floor (1151 -> 248MB, floor tripped by 2MB, no OOM, memory returned
+post-run). Revised budget: ~1.0GB consumed at peak; start with >=1.3GB
+free for comfort. The 800-probe (same tuning) never tripped the guard
+(1322 -> 449MB floor).** Procedure that survived two soaks without OOM:
 
 - Gate each +200-bot shard step on **>400MB free**; hard floor
   **250MB** — below it, stop adding load and report what completed
