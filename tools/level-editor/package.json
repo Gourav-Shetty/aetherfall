@@ -1,0 +1,12 @@
+{
+  "name": "@aetherfall/level-editor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Standalone canvas level editor (static index.html, no build, no server needed)",
+  "scripts": {
+    "build": "node -e \"console.log('level-editor: static index.html, nothing to build')\"",
+    "typecheck": "node -e \"process.exit(0)\"",
+    "test": "node -e \"process.exit(0)\""
+  }
+}

@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>AETHERFALL — Level Editor (standalone)</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #0b0e14; color: #e8eef7; font-family: system-ui, sans-serif; }
+  #app { display: flex; gap: 12px; padding: 12px; flex-wrap: wrap; }
+  #panel { width: 300px; display: flex; flex-direction: column; gap: 8px; }
+  #panel h1 { font-size: 16px; margin: 0; letter-spacing: 2px; }
+  #panel .row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  button, input, textarea { background: #1a2230; color: #e8eef7; border: 1px solid #2a3547; border-radius: 6px; padding: 6px 10px; font-size: 13px; }
+  button { cursor: pointer; } button:hover { border-color: #4dc3ff; } button.sel { border-color: #59d98c; color: #59d98c; }
+  #cv { border: 1px solid #2a3547; border-radius: 8px; cursor: crosshair; image-rendering: pixelated; touch-action: none; }
+  #out { width: 100%; height: 90px; font-family: monospace; font-size: 11px; }
+  .hint { color: #8fa3bf; font-size: 12px; }
+  #status { font-size: 12px; color: #9ecbff; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="panel">
+    <h1>AETHERFALL LEVEL EDITOR</h1>
+    <div><b id="count">0</b> walls · <span id="status">standalone (no server)</span></div>
+    <div class="row">
+      <button id="t-paint" class="sel">paint</button>
+      <button id="t-erase">erase</button>
+      <button id="t-room">room</button>
+      <button id="t-corridor">corridor</button>
+      <button id="t-dungeon">dungeon</button>
+    </div>
+    <div class="row">
+      <label>seed <input id="seed" type="number" value="1337" style="width:90px"/></label>
+      <button id="b-centered">stamp at center</button>
+    </div>
+    <div class="row">
+      <button id="b-export">save walls.json</button>
+      <button id="b-import">import file</button>
+      <button id="b-server">push to server</button>
+      <button id="b-clear">clear</button>
+    </div>
+    <div class="row">
+      <label style="font-size:12px">server <input id="server" type="text" value="http://localhost:9090" style="width:170px"/></label>
+      <label style="font-size:12px">token <input id="token" type="text" value="dev" style="width:80px"/></label>
+    </div>
+    <input id="file" type="file" accept="application/json,.json" style="display:none"/>
+    <textarea id="out" readonly placeholder="exported walls.json appears here"></textarea>
+    <div class="hint">100×100 arena, 1 tile = 1 unit. paint/erase drag on the grid;
+      room/corridor/dungeon stamp on click. "save" downloads a walls.json the
+      server accepts (GET/POST /walls, docs/EDITOR.md). "push to server" POSTs
+      directly (needs ADMIN_TOKEN).</div>
+  </div>
+  <canvas id="cv" width="600" height="600"></canvas>
+</div>
+<script>
+'use strict';
+// ---- model (tile keys "x,y", arena 100x100) ----
+const ARENA = 100, N = 100, CELL = 6;
+const walls = new Set();
+let tool = 'paint';
+let painting = false;
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const countEl = document.getElementById('count');
+const statusEl = document.getElementById('status');
+const outEl = document.getElementById('out');
+
+function sync() { countEl.textContent = String(walls.size); draw(); }
+function setStatus(s) { statusEl.textContent = s; }
+
+// ---- deterministic worldgen (mirrors engine/src/worldgen.ts) ----
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0; a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function genDungeon(width, height, seed) {
+  const rand = mulberry32(seed >>> 0);
+  const tiles = Array.from({ length: height }, () => Array.from({ length: width }, () => 1));
+  const targetRooms = Math.max(4, Math.floor((width * height) / 220));
+  const rooms = [];
+  for (let attempt = 0; attempt < targetRooms * 12 && rooms.length < targetRooms; attempt++) {
+    const w = 4 + Math.floor(rand() * Math.min(10, width - 4));
+    const h = 4 + Math.floor(rand() * Math.min(8, height - 4));
+    const x = 1 + Math.floor(rand() * (width - w - 1));
+    const y = 1 + Math.floor(rand() * (height - h - 1));
+    let overlap = false;
+    for (const r of rooms) {
+      if (x < r.x + r.w + 1 && x + w + 1 > r.x && y < r.y + r.h + 1 && y + h + 1 > r.y) { overlap = true; break; }
+    }
+    if (overlap) continue;
+    rooms.push({ x, y, w, h });
+    for (let yy = y; yy < y + h; yy++) for (let xx = x; xx < x + w; xx++) tiles[yy][xx] = 0;
+  }
+  if (rooms.length === 0) {
+    const w = Math.min(8, width - 2), h = Math.min(6, height - 2);
+    const x = Math.floor((width - w) / 2), y = Math.floor((height - h) / 2);
+    rooms.push({ x, y, w, h });
+    for (let yy = y; yy < y + h; yy++) for (let xx = x; xx < x + w; xx++) tiles[yy][xx] = 0;
+  }
+  const center = (r) => [r.x + Math.floor(r.w / 2), r.y + Math.floor(r.h / 2)];
+  const carveH = (x0, x1, y) => { const a = Math.min(x0, x1), b = Math.max(x0, x1);
+    for (let x = a; x <= b; x++) if (y >= 1 && y < height - 1 && x >= 1 && x < width - 1) tiles[y][x] = 0; };
+  const carveV = (y0, y1, x) => { const a = Math.min(y0, y1), b = Math.max(y0, y1);
+    for (let y = a; y <= b; y++) if (y >= 1 && y < height - 1 && x >= 1 && x < width - 1) tiles[y][x] = 0; };
+  for (let i = 1; i < rooms.length; i++) {
+    const [px, py] = center(rooms[i - 1]), [qx, qy] = center(rooms[i]);
+    if (rand() < 0.5) { carveH(px, qx, py); carveV(py, qy, qx); }
+    else { carveV(py, qy, px); carveH(px, qx, qy); }
+  }
+  return { width, height, tiles, rooms, seed };
+}
+
+// ---- brushes ----
+function add(tx, ty) { if (tx >= 0 && ty >= 0 && tx < ARENA && ty < ARENA) walls.add(tx + ',' + ty); }
+function del(tx, ty) { walls.delete(tx + ',' + ty); }
+function seedVal() { return (Number(document.getElementById('seed').value) || 0) >>> 0; }
+
+function stampRoom(cx, cy) {
+  const d = genDungeon(24, 18, seedVal());
+  const r = d.rooms[seedVal() % d.rooms.length] || { w: 8, h: 6 };
+  const w = Math.max(4, Math.min(20, r.w)), h = Math.max(4, Math.min(14, r.h));
+  const x0 = cx - Math.floor(w / 2), y0 = cy - Math.floor(h / 2);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    if (x === 0 || y === 0 || x === w - 1 || y === h - 1) add(x0 + x, y0 + y);
+    else del(x0 + x, y0 + y);
+  }
+  del(x0 + Math.floor(w / 2), y0 + h - 1); // door
+  sync();
+}
+function stampCorridor(cx, cy) {
+  for (let i = -5; i <= 5; i++) {
+    del(cx + i, cy); add(cx + i, cy - 1); add(cx + i, cy + 1);
+  }
+  sync();
+}
+function stampDungeon(cx, cy) {
+  const d = genDungeon(24, 18, seedVal());
+  const ox = cx - 12, oy = cy - 9;
+  for (let y = 0; y < d.height; y++) for (let x = 0; x < d.width; x++) {
+    if (d.tiles[y][x] === 1) add(ox + x, oy + y); else del(ox + x, oy + y);
+  }
+  sync();
+}
+
+// ---- canvas ----
+function draw() {
+  ctx.fillStyle = '#0b0e14'; ctx.fillRect(0, 0, cv.width, cv.height);
+  for (let ty = 0; ty < N; ty++) {
+    for (let tx = 0; tx < N; tx++) {
+      ctx.fillStyle = (tx + ty) % 2 === 0 ? '#1d4a26' : '#1a4222';
+      ctx.fillRect(tx * CELL, ty * CELL, CELL, CELL);
+    }
+  }
+  ctx.fillStyle = 'rgba(178,102,255,0.85)';
+  for (const k of walls) {
+    const c = k.indexOf(',');
+    const tx = Number(k.slice(0, c)), ty = Number(k.slice(c + 1));
+    ctx.fillRect(tx * CELL, ty * CELL, CELL, CELL);
+  }
+  ctx.strokeStyle = '#2a3547';
+  for (let i = 0; i <= N; i += 10) {
+    ctx.beginPath(); ctx.moveTo(i * CELL, 0); ctx.lineTo(i * CELL, N * CELL); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, i * CELL); ctx.lineTo(N * CELL, i * CELL); ctx.stroke();
+  }
+}
+function evtTile(e) {
+  const r = cv.getBoundingClientRect();
+  const sx = (e.clientX - r.left) * (cv.width / r.width);
+  const sy = (e.clientY - r.top) * (cv.height / r.height);
+  return [Math.floor(sx / CELL), Math.floor(sy / CELL)];
+}
+function applyAt(tx, ty, erase) {
+  if (tx < 0 || ty < 0 || tx >= ARENA || ty >= ARENA) return;
+  if (erase) del(tx, ty); else add(tx, ty);
+}
+cv.addEventListener('pointerdown', (e) => {
+  e.preventDefault();
+  cv.setPointerCapture(e.pointerId);
+  const [tx, ty] = evtTile(e);
+  if (tool === 'room') { stampRoom(tx, ty); return; }
+  if (tool === 'corridor') { stampCorridor(tx, ty); return; }
+  if (tool === 'dungeon') { stampDungeon(tx, ty); return; }
+  painting = true;
+  applyAt(tx, ty, tool === 'erase' || e.button === 2 || e.shiftKey);
+  sync();
+});
+cv.addEventListener('pointermove', (e) => {
+  if (!painting) return;
+  const [tx, ty] = evtTile(e);
+  applyAt(tx, ty, tool === 'erase' || (e.buttons & 2) !== 0 || e.shiftKey);
+  sync();
+});
+cv.addEventListener('pointerup', () => { painting = false; });
+cv.addEventListener('contextmenu', (e) => e.preventDefault());
+
+// ---- toolbar ----
+function sel(id) {
+  for (const t of ['t-paint', 't-erase', 't-room', 't-corridor', 't-dungeon'])
+    document.getElementById(t).classList.remove('sel');
+  document.getElementById(id).classList.add('sel');
+}
+for (const [id, name] of [['t-paint', 'paint'], ['t-erase', 'erase'], ['t-room', 'room'], ['t-corridor', 'corridor'], ['t-dungeon', 'dungeon']])
+  document.getElementById(id).onclick = () => { tool = name; sel(id); };
+document.getElementById('b-centered').onclick = () => {
+  if (tool === 'room') stampRoom(50, 50);
+  else if (tool === 'corridor') stampCorridor(50, 50);
+  else if (tool === 'dungeon') stampDungeon(50, 50);
+  else stampRoom(50, 50);
+};
+document.getElementById('b-clear').onclick = () => { walls.clear(); sync(); };
+
+// ---- compatible file format (accepts rects + legacy tuples on import) ----
+function toDoc() {
+  const rects = [...walls].map((k) => {
+    const c = k.indexOf(',');
+    return { x: Number(k.slice(0, c)), y: Number(k.slice(c + 1)), w: 1, h: 1 };
+  }).sort((a, b) => a.y - b.y || a.x - b.x);
+  return { format: 'aetherfall-walls/v1', tile: 1, version: 1, count: rects.length, walls: rects };
+}
+function loadDoc(doc) {
+  if (!doc || typeof doc !== 'object' || !Array.isArray(doc.walls)) throw new Error('walls[] missing');
+  if (doc.format !== undefined && doc.format !== 'aetherfall-walls/v1') throw new Error('bad format');
+  if (doc.walls.length > 10000) throw new Error('too many walls');
+  const next = new Set();
+  const put = (tx, ty) => {
+    if (!Number.isFinite(tx) || !Number.isFinite(ty)) throw new Error('bad entry');
+    tx = Math.floor(tx); ty = Math.floor(ty);
+    if (tx < 0 || ty < 0 || tx > 1000 || ty > 1000) throw new Error('coord out of range');
+    if (tx < ARENA && ty < ARENA) next.add(tx + ',' + ty);
+  };
+  for (const e of doc.walls) {
+    if (Array.isArray(e)) {
+      if (e.length !== 2) throw new Error('bad entry');
+      put(e[0], e[1]);
+    } else if (e && typeof e === 'object') {
+      if ('tx' in e || 'ty' in e) { put(e.tx, e.ty); continue; }
+      const w = e.w === undefined ? 1 : e.w, h = e.h === undefined ? 1 : e.h;
+      if (!Number.isFinite(e.x) || !Number.isFinite(e.y) || !Number.isFinite(w) || !Number.isFinite(h)) throw new Error('bad entry');
+      if (w < 1 || h < 1 || w > 128 || h > 128) throw new Error('bad extent');
+      for (let ty = Math.floor(e.y); ty < Math.ceil(e.y + h); ty++)
+        for (let tx = Math.floor(e.x); tx < Math.ceil(e.x + w); tx++) put(tx, ty);
+    } else throw new Error('bad entry');
+  }
+  walls.clear();
+  for (const k of next) walls.add(k);
+  sync();
+}
+document.getElementById('b-export').onclick = () => {
+  const doc = toDoc();
+  const pretty = JSON.stringify(doc, null, 2);
+  outEl.value = JSON.stringify(doc);
+  const blob = new Blob([pretty], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'walls.json';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  setStatus('exported ' + doc.count + ' walls');
+};
+const fileEl = document.getElementById('file');
+document.getElementById('b-import').onclick = () => fileEl.click();
+fileEl.onchange = async () => {
+  const f = fileEl.files[0];
+  fileEl.value = '';
+  if (!f) return;
+  try { loadDoc(JSON.parse(await f.text())); setStatus('imported ' + f.name); }
+  catch (err) { setStatus('import failed: ' + err.message); }
+};
+document.getElementById('b-server').onclick = async () => {
+  const base = document.getElementById('server').value.replace(/\/+$/, '');
+  const token = document.getElementById('token').value;
+  setStatus('pushing…');
+  try {
+    const res = await fetch(base + '/walls', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: 'Bearer ' + token },
+      body: JSON.stringify(toDoc()),
+    });
+    if (!res.ok) throw new Error('POST /walls ' + res.status);
+    const body = await res.json();
+    setStatus('saved on server (' + body.count + ' walls)');
+  } catch (err) { setStatus('push failed: ' + err.message); }
+};
+
+draw();
+sync();
+</script>
+</body>
+</html>

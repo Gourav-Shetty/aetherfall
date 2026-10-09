@@ -1,0 +1,14 @@
+{"t":0,"msg":{"t":"welcome","id":7,"tick":100,"snapshot":[{"id":7,"kind":"player","p":{"x":20,"y":20},"v":{"x":0,"y":0},"hp":100,"maxHp":100,"name":"scout","seq":0},{"id":900001,"kind":"mob","p":{"x":26,"y":20},"v":{"x":0,"y":0},"hp":60,"maxHp":60,"name":"gloomfang-1","level":1}]}}
+{"t":100,"msg":{"t":"snapshot","tick":102,"entities":[{"id":7,"kind":"player","p":{"x":22,"y":20},"v":{"x":2,"y":0},"hp":100,"maxHp":100,"name":"scout","seq":1},{"id":900001,"kind":"mob","p":{"x":26,"y":20},"v":{"x":0,"y":0},"hp":60,"maxHp":60,"name":"gloomfang-1","level":1}],"removed":[]}}
+{"t":200,"msg":{"t":"snapshot","tick":104,"entities":[{"id":7,"kind":"player","p":{"x":24,"y":21},"v":{"x":2,"y":1},"hp":100,"maxHp":100,"name":"scout","seq":2},{"id":900001,"kind":"mob","p":{"x":26,"y":20},"v":{"x":0,"y":0},"hp":48,"maxHp":60,"name":"gloomfang-1","level":1}],"removed":[]}}
+{"t":300,"msg":{"t":"event","kind":"mob-die","payload":{"id":900001,"killedBy":7}}}
+{"t":400,"msg":{"t":"snapshot","tick":106,"entities":[{"id":7,"kind":"player","p":{"x":24,"y":21},"v":{"x":0,"y":0},"hp":100,"maxHp":100,"name":"scout","seq":3},{"id":900002,"kind":"mob","p":{"x":24,"y":23},"v":{"x":0,"y":0},"hp":60,"maxHp":60,"name":"gloomfang-2","level":1}],"removed":[900001]}}
+{"t":1600,"msg":{"t":"snapshot","tick":118,"entities":[{"id":7,"kind":"player","p":{"x":24,"y":21},"v":{"x":0,"y":0},"hp":100,"maxHp":100,"name":"scout","seq":4},{"id":900002,"kind":"mob","p":{"x":24,"y":23},"v":{"x":0,"y":0},"hp":36,"maxHp":60,"name":"gloomfang-2","level":1}],"removed":[]}}
+{"t":1700,"msg":{"t":"snapshot","tick":120,"entities":[{"id":7,"kind":"player","p":{"x":24,"y":21},"v":{"x":0,"y":0},"hp":100,"maxHp":100,"name":"scout","seq":5}],"removed":[900002]}}
+{"t":1800,"msg":{"t":"snapshot","tick":122,"entities":[{"id":7,"kind":"player","p":{"x":24,"y":21},"v":{"x":0,"y":0},"hp":70,"maxHp":100,"name":"scout","seq":6}],"removed":[]}}
+{"t":1900,"msg":{"t":"event","kind":"respawn","payload":{"id":7}}}
+{"t":2000,"msg":{"t":"snapshot","tick":124,"entities":[{"id":7,"kind":"player","p":{"x":50,"y":50},"v":{"x":0,"y":0},"hp":100,"maxHp":100,"name":"scout","seq":7},{"id":900002,"kind":"mob","p":{"x":24,"y":23},"v":{"x":0,"y":0},"hp":36,"maxHp":60,"name":"gloomfang-2","level":1}],"removed":[]}}
+{"t":2100,"msg":{"t":"event","kind":"mob-spawn","payload":{"id":900002,"name":"gloomfang-2","x":24,"y":23,"hp":60,"maxHp":60}}}
+{"t":2200,"msg":{"t":"event","kind":"despawn","payload":{"id":7}}}
+{"t":2300,"msg":{"t":"chat","from":"scout","text":"gg","channel":"say"}}
+{"t":2400,"msg":{"t":"event","kind":"mob-aggro","payload":{"id":900002,"targetId":7}}}

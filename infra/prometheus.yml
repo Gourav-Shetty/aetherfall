@@ -1,0 +1,22 @@
+# Prometheus scrape config for AETHERFALL (optional, --profile observability).
+# Server exposes Prometheus text exposition at :9090/metrics (server/src/metrics.ts):
+#   aetherfall_tick_duration_ms_last/avg/p95, aetherfall_ticks_total,
+#   aetherfall_players, aetherfall_connections_total,
+#   aetherfall_snapshot_bytes_total, aetherfall_snapshots_sent_total,
+#   aetherfall_anticheat_rejects_total{kind}, aetherfall_uptime_seconds.
+
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: aetherfall-server
+    static_configs:
+      # compose DNS name (prometheus container -> server container)
+      - targets: ["server:9090"]
+        labels:
+          env: compose
+      # local dev without docker (prometheus on host scraping local server)
+      - targets: ["host.docker.internal:9090"]
+        labels:
+          env: host

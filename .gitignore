@@ -1,0 +1,17 @@
+node_modules/
+dist/
+dist-test/
+*.log
+.env
+.env.local
+coverage/
+.vite/
+data/
+# Local ops runtime state: shard pid/log files and soak reports written by
+# ops/scripts/{start-shards,smoke-test,soak}.ps1 and the CI smoke+soak job.
+.ops/
+*.db
+*.sqlite
+# Replay: the .bin container is derived from a committed .ndjson via
+# `analyze --bin`, so keep it out of git (2MB+ per run).
+tools/replay/recordings/*.bin

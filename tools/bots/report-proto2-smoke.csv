@@ -1,0 +1,5 @@
+bot,name,profile,connect_ms,welcome_ms,snapshots,msgs,inputs_sent,chats_sent,attacks_sent,reconnects,tick_gaps,max_tick_gap,disconnected,hazard_avoids,hazard_waypoints,hazard_max_dps,error,proto,bytes_down,binary_frames
+0,bot0,idle,35,59,100,169,9,0,0,0,0,0,1,0,0,0,"",2,15658,163
+1,bot1,fighter,17,47,100,185,162,12,47,0,0,0,1,0,0,0,"",2,17547,179
+2,bot2,roam,16,50,100,180,162,9,3,0,0,0,1,79,0,5.33,"",2,15552,174
+3,bot3,roam,15,53,100,177,162,6,4,0,0,0,1,15,0,5.78,"",2,15287,171

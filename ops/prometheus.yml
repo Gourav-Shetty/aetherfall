@@ -1,0 +1,78 @@
+# AETHERFALL — Prometheus scrape config (5-shard local cluster).
+#
+# The server exposes Prometheus text exposition on its METRICS_PORT
+# (server/src/metrics.ts + server/src/perf.ts), and ops/scripts/start-shards.ps1
+# lays the local cluster out as:
+#
+#   shard-0  ws :8081  metrics :9090
+#   shard-1  ws :8082  metrics :9091
+#   shard-2  ws :8083  metrics :9092
+#   shard-3  ws :8084  metrics :9093
+#   shard-4  ws :8085  metrics :9094
+#
+# The `instance` label Prometheus adds here is what the shard-skew alert
+# aggregates on, so keep one target per shard.
+#
+# Families this job collects (all with HELP+TYPE; validated by
+# ops/scripts/lib/check-metrics.mjs):
+#   aetherfall_info{shard,version,protocol,backend}   build + shard identity
+#   aetherfall_uptime_seconds                          process uptime
+#   aetherfall_ticks_total, aetherfall_tick_duration_ms_{last,avg,p50,p95,max}
+#   aetherfall_tick_duration_histogram_ms{le}          tick ms buckets
+#   aetherfall_snapshot_duration_histogram_ms{le}      snapshot ms buckets
+#   aetherfall_tick_schedule_lag_ms{,_max}, aetherfall_tick_drift_ticks
+#   aetherfall_players, _players_alive, _player_hp_ratio
+#   aetherfall_mobs_alive, _mobs_killed_total, _mobs_killed_5m, _mobs_killed_per_min
+#   aetherfall_quests_active, aetherfall_parties
+#   aetherfall_anticheat_rejects_total{kind}, _anticheat_strikes, _strikes_max
+#   aetherfall_frames_json_total, _frames_binary_total, _binary_frame_ratio
+#   aetherfall_wire_bytes_total, _per_sec, _per_player_per_sec
+#   aetherfall_snapshot_encode_us_{last,avg,p95}
+#   aetherfall_errors_total{kind}, aetherfall_errors_per_min
+#   aetherfall_process_{resident_memory,heap_used,heap_total,external_memory}_bytes
+#   aetherfall_shard_load_ratio, aetherfall_draining
+#
+# Local run (no docker daemon required):
+#   prometheus --config.file=ops/prometheus.yml
+# Grafana dashboard: ops/dashboards/grafana.json
+
+global:
+  scrape_interval: 5s
+  scrape_timeout: 4s
+  evaluation_interval: 5s
+  external_labels:
+    game: aetherfall
+    env: local
+
+rule_files:
+  - alerts.yml
+
+scrape_configs:
+  - job_name: aetherfall-server
+    metrics_path: /metrics
+    static_configs:
+      # Host-local 5-shard cluster (ops/scripts/start-shards.ps1). Every target
+      # is scraped independently; `instance` distinguishes the shards.
+      - targets:
+          - localhost:9090
+          - localhost:9091
+          - localhost:9092
+          - localhost:9093
+          - localhost:9094
+        labels:
+          env: local
+          role: shard
+
+  # Same fleet, reached from inside a container (infra/docker-compose.yml).
+  # Commented out by default so the file stays valid without that profile.
+  # - job_name: aetherfall-compose
+  #   static_configs:
+  #     - targets: ["server:9090"]
+  #       labels:
+  #         env: compose
+  #         role: shard
+
+  # Prometheus's own health, so "no data" is distinguishable from "no targets".
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9099"]

@@ -1,0 +1,25 @@
+{
+  "name": "aetherfall",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AETHERFALL - custom MMO engine from scratch (ECS + authoritative netcode + procedural world)",
+  "type": "module",
+  "workspaces": [
+    "shared",
+    "engine",
+    "server",
+    "client",
+    "tools/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "test": "npm run test --workspaces",
+    "dev:server": "npm run dev --workspace=@aetherfall/server",
+    "dev:client": "npm run dev --workspace=@aetherfall/client",
+    "bots": "npm run start --workspace=@aetherfall/bots",
+    "ci": "npm run typecheck --workspaces && npm run test --workspaces && npm run build --workspaces"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

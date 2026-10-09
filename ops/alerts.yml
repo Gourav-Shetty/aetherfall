@@ -1,0 +1,177 @@
+# AETHERFALL — Prometheus alert rules (8 alerts).
+#
+# Loaded by ops/prometheus.yml (`rule_files`). Thresholds are tuned for the
+# 20Hz fixed-step server: the tick budget is 50ms, so 40ms p95 means the loop
+# is about to start dropping client-visible cadence. Reference load points from
+# docs/BENCHMARKS.md / docs/SCALE.md: ~1ms ticks at 20 bots, ~5ms at 100.
+#
+# Every `runbook` label points at a section of docs/OPS.md.
+# Validated by ops/scripts/validate-ops.py (parses the YAML, checks every rule
+# has alert/expr/for/labels/annotations and that each referenced metric really
+# is exported by the server).
+
+groups:
+  - name: aetherfall-tick
+    interval: 15s
+    rules:
+      # 1. Tick budget burn. p95 over 40ms means the loop is 80% of its 50ms
+      #    budget; clients see snapshot cadence slip before it errors.
+      - alert: AetherfallTickP95High
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (instance, le) (rate(aetherfall_tick_duration_histogram_ms_bucket[5m]))
+          ) > 40
+        for: 5m
+        labels:
+          severity: warning
+          runbook: docs/OPS.md#incident-tick-spike
+        annotations:
+          summary: "tick p95 {{ $value | humanize }}ms over the 40ms budget on {{ $labels.instance }}"
+          description: >-
+            Server tick p95 is {{ $value }}ms on {{ $labels.instance }} (budget 50ms).
+            Snapshot cadence is 10Hz, so players already see stutter. Check
+            aetherfall_tick_section_ms_avg for the hot section, then
+            aetherfall_players for load.
+          runbook_url: docs/OPS.md#incident-tick-spike
+
+      # 2. Cadence collapse. `aetherfall_tick_rate_ratio` is observed ticks/sec
+      #    divided by the configured rate, which is platform-honest: Windows'
+      #    ~15.6ms timer granularity pins a healthy 20Hz loop at ~0.8, so the
+      #    threshold sits well below that and only fires on a real stall (GC
+      #    death spiral, blocked loop, host CPU starvation).
+      - alert: AetherfallTickDrift
+        expr: min by (instance) (aetherfall_tick_rate_ratio) < 0.5
+        for: 5m
+        labels:
+          severity: critical
+          runbook: docs/OPS.md#incident-tick-spike
+        annotations:
+          summary: "tick cadence at {{ $value }}x target on {{ $labels.instance }}"
+          description: >-
+            {{ $labels.instance }} is running at {{ $value }}x its configured
+            20Hz cadence for 5 minutes. Ticks are being skipped, so clients see
+            gaps in their snapshot stream. Compare with
+            aetherfall_tick_schedule_lag_ms_max (per-tick overshoot) and
+            aetherfall_process_resident_memory_bytes (a growing heap usually
+            means GC pauses, not starvation).
+
+  - name: aetherfall-capacity
+    interval: 30s
+    rules:
+      # 3. An empty shard. Single-shard prod: 0 players for 5m means the process
+      #    is up but not serving (bad routing, wrong port, wrong LB target).
+      - alert: AetherfallNoPlayers
+        expr: sum(aetherfall_players) == 0 and on() (time() - aetherfall_uptime_seconds > 300)
+        for: 5m
+        labels:
+          severity: warning
+          runbook: docs/OPS.md#incident-no-players
+        annotations:
+          summary: "no players connected for 5 minutes"
+          description: >-
+            Every shard reports 0 players while the fleet has been up for more
+            than 5 minutes. Either genuinely idle (off-peak) or routing is
+            broken. Cross-check SHARDS, the redirect URLs and the shard registry
+            in /healthz before scaling in.
+          runbook_url: docs/OPS.md#incident-no-players
+
+      # 4. Shard skew. Sticky rendezvous routing should keep the spread near 1x;
+      #    max/min above 3 means a shard is stuck and MAX_PLAYERS_PER_SHARD
+      #    admission will start redirecting players away from the healthy ones.
+      - alert: AetherfallShardSkew
+        expr: |
+          (max by (job) (aetherfall_players) / clamp_min(min by (job) (aetherfall_players), 1)) > 3
+          and sum by (job) (aetherfall_players) > 20
+        for: 5m
+        labels:
+          severity: warning
+          runbook: docs/OPS.md#incident-shard-skew
+        annotations:
+          summary: "player distribution across shards is skewed more than 3x"
+          description: >-
+            The busiest shard holds more than 3x the players of the least busy one
+            (total > 20). Sticky rendezvous hashing should keep this near 1x.
+            Likely one shard is draining, unhealthy, or its WS port is blocked.
+            Compare per-instance aetherfall_players and aetherfall_tick_ms_max.
+          runbook_url: docs/OPS.md#incident-shard-skew
+
+  - name: aetherfall-security
+    interval: 15s
+    rules:
+      # 5. Anticheat spike. Above 25 rejections/min sustained is either a bot
+      #    farm or a false-positive regression introduced by a deploy.
+      - alert: AetherfallAnticheatSpike
+        expr: sum(rate(aetherfall_anticheat_rejects_total[5m])) * 60 > 25
+        for: 5m
+        labels:
+          severity: warning
+          runbook: docs/OPS.md#incident-anticheat-false-positives
+        annotations:
+          summary: "anticheat rejecting {{ $value }} inputs/min"
+          description: >-
+            Rejections are running at {{ $value }}/min across the fleet. Break
+            them down by kind (aetherfall_anticheat_rejects_total): a burst of
+            input-rate after a deploy is a queueing false positive, while
+            speed/teleport spikes usually mean a real exploiter. Live strike
+            count is aetherfall_anticheat_strikes.
+          runbook_url: docs/OPS.md#incident-anticheat-false-positives
+
+  - name: aetherfall-resources
+    interval: 30s
+    rules:
+      # 6. Memory growth. 1.2GB RSS per process is well past the ~600MB the
+      #    100-bot runs plateau at; a leak shows as a sawtooth that never
+      #    returns to baseline.
+      - alert: AetherfallMemoryHigh
+        expr: aetherfall_process_resident_memory_bytes > 1.2e9
+        for: 10m
+        labels:
+          severity: warning
+          runbook: docs/OPS.md#incident-memory-growth
+        annotations:
+          summary: "RSS {{ $value }}B on {{ $labels.instance }}"
+          description: >-
+            Process RSS has been above 1.2GB for 10 minutes. Compare
+            aetherfall_process_heap_used_bytes to tell a leak from arena growth,
+            and aetherfall_players for a load correlation. Rolling the shard is
+            the safe response - drain is ordered.
+          runbook_url: docs/OPS.md#incident-memory-growth
+
+      # 7. Wire cost per player. Snapshot fan-out is the usual cause of a
+      #    bandwidth cliff: >25kB/s/player is roughly 10x the 20-bot baseline.
+      - alert: AetherfallSnapshotBytesPerPlayerHigh
+        expr: avg by (instance) (aetherfall_wire_bytes_per_player_per_sec) > 25000
+        for: 5m
+        labels:
+          severity: warning
+          runbook: docs/OPS.md#incident-tick-spike
+        annotations:
+          summary: "{{ $value }}B/s per player on {{ $labels.instance }}"
+          description: >-
+            Outbound bytes per player per second are {{ $value }}B, well above
+            the ~2.5kB/s baseline. Entities inside the 40m interest radius are
+            growing, or a client is resyncing every snapshot. Check
+            aetherfall_snapshot_last_bytes and aetherfall_mobs_alive.
+          runbook_url: docs/OPS.md#incident-tick-spike
+
+  - name: aetherfall-errors
+    interval: 30s
+    rules:
+      # 8. Error rate. Any sustained tick/http/ws/persist error is a real defect:
+      #    the loop swallows exceptions by design so it can keep serving.
+      - alert: AetherfallErrorRateHigh
+        expr: avg by (instance) (aetherfall_errors_per_min) > 5
+        for: 5m
+        labels:
+          severity: critical
+          runbook: docs/OPS.md#incident-tick-spike
+        annotations:
+          summary: "{{ $value }} errors/min on {{ $labels.instance }}"
+          description: >-
+            Errors are running at {{ $value }}/min on {{ $labels.instance }}.
+            Split them by aetherfall_errors_total{kind}: tick means a gameplay
+            system is throwing (the loop survives but state is skipped), persist
+            means the DB flush is failing and snapshots are being lost, http
+            points at the walls/admin surface.
+          runbook_url: docs/OPS.md#incident-tick-spike

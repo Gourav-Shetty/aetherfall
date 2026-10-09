@@ -1,0 +1,17 @@
+{
+  "name": "@aetherfall/engine",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --test dist/**/*.test.js",
+    "bench": "node bench-worldgen.mjs",
+    "bench:worldgen": "node bench-worldgen.mjs"
+  },
+  "dependencies": {
+    "@aetherfall/shared": "0.1.0"
+  }
+}

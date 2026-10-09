@@ -1,0 +1,103 @@
+# AETHERFALL — optional container topology (dev runs WITHOUT docker).
+# Default `docker compose up` starts server + web only (SQLite + in-memory fallback).
+# Postgres / Redis / Prometheus are opt-in via profiles (no daemon required to read this file).
+#
+#   docker compose up --build            # server (8081+9090) + web (8080)
+#   docker compose --profile full up    # + postgres + redis
+#   docker compose --profile observability up  # + prometheus (9091)
+#
+# Server env: PORT=8081 WS, METRICS_PORT=9090 (/metrics, /healthz).
+# Prod persistence: DATABASE_URL=postgres://aether:aether@postgres:5432/aetherfall
+# and REDIS_URL=redis://redis:6379 (match the `full`-profile services below;
+# without the profile the server warns + falls back to sqlite/memory).
+
+services:
+  server:
+    image: node:22-bookworm
+    working_dir: /app
+    volumes:
+      - ..:/app
+    command: ["bash", "-lc", "npm ci --ignore-scripts && npm run build --workspaces && node server/dist/index.js"]
+    ports:
+      - "8081:8081"   # authoritative WS
+      - "9090:9090"   # /metrics + /healthz
+    environment:
+      PORT: "8081"
+      METRICS_PORT: "9090"
+      SHARD_ID: shard-0
+      # Prod persistence (docs/PERSISTENCE.md). Under `--profile full` these
+      # resolve to the services below; without the profile the server warns
+      # and falls back to sqlite + in-memory presence (still boots).
+      DATABASE_URL: postgres://aether:aether@postgres:5432/aetherfall
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        restart: true
+        required: false
+      redis:
+        restart: true
+        required: false
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:9090/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  web:
+    # Static client bundle (run `npm run build --workspace=@aetherfall/client` first).
+    image: nginx:alpine
+    volumes:
+      - ../client/dist:/usr/share/nginx/html:ro
+    ports:
+      - "8080:80"
+    depends_on:
+      - server
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: aether
+      POSTGRES_PASSWORD: aether
+      POSTGRES_DB: aetherfall
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    profiles: ["full"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aether -d aetherfall"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    profiles: ["full"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9091:9090"
+    depends_on:
+      - server
+    profiles: ["observability", "full"]
+    restart: unless-stopped
+
+volumes:
+  pgdata:

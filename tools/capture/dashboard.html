@@ -1,0 +1,679 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>AETHERFALL — benchmark dashboard</title>
+<style>
+:root{--bg:#0b0e14;--panel:#141a24;--line:#2a3547;--txt:#e8eef7;--dim:#8fa3bf;--acc:#59d98c;--acc2:#4dc3ff;--warn:#ffb84d;--bad:#ff5252}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--txt);font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:1080px;margin:0 auto;padding:28px 20px 60px}
+h1{letter-spacing:3px;margin:0}.sub{color:var(--dim);font-size:13px;margin:6px 0 18px}
+.row{display:flex;gap:10px;flex-wrap:wrap;margin:14px 0}
+select,input,button{background:var(--panel);color:var(--txt);border:1px solid var(--line);border-radius:6px;padding:8px 10px;font-size:13px}
+button{cursor:pointer}button:hover{border-color:var(--acc2)}
+.cards{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:16px 0}
+@media(max-width:800px){.cards{grid-template-columns:1fr 1fr}}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px}
+.card .k{font-size:11px;letter-spacing:2px;color:var(--dim)}.card .v{font-size:22px;font-weight:800;margin-top:4px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}@media(max-width:900px){.grid{grid-template-columns:1fr}}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px}
+.panel h2{margin:0 0 4px;font-size:13px;letter-spacing:2px;color:var(--dim)}
+.panel p{margin:0 0 10px;font-size:12px;color:var(--dim)}
+canvas{width:100%;height:220px;background:#0b0e14;border:1px solid var(--line);border-radius:6px}
+table{width:100%;border-collapse:collapse;font-size:12px;margin-top:10px}
+th,td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:right}th:first-child,td:first-child{text-align:left}
+th{color:var(--dim);font-weight:600}
+.foot{margin-top:18px;color:var(--dim);font-size:12px}
+.lbl{font-size:11px;letter-spacing:2px;color:var(--dim);align-self:center}
+#r-heat{height:480px;image-rendering:pixelated}
+#r-timeline{height:300px}
+#r-frames,#r-speed,#r-kd,#r-ttff,#r-dmg,#r-peak,#r-disc,#r-cells{font-size:18px}
+code{background:#0b0e14;border:1px solid var(--line);border-radius:4px;padding:1px 6px;font-size:11px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>AETHERFALL · BENCH DASHBOARD</h1>
+  <div class="sub">Static page, zero deps — parses <code>tools/bots/report*.csv</code> with canvas charts. Open via file:// or any static server.</div>
+  <div class="row">
+    <select id="src">
+      <option value="../bots/report.csv">tools/bots/report.csv (50-bot)</option>
+      <option value="../bots/report-qa20.csv">tools/bots/report-qa20.csv (20-bot)</option>
+      <option value="../replay/recordings/trial.ndjson">tools/replay/recordings/trial.ndjson</option>
+      <option value="../replay/fixtures/mini.ndjson">tools/replay/fixtures/mini.ndjson</option>
+      <option value="__sample">embedded sample (offline fallback)</option>
+    </select>
+    <input type="file" id="file" accept=".csv"/>
+    <button id="reload">Reload</button>
+    <span id="meta" class="sub" style="margin:6px"></span>
+  </div>
+
+  <!-- REPLAY-ANALYTICS: heatmap + timeline from .ndjson/.bin recordings -->
+  <div class="row">
+    <b class="lbl">REPLAY</b>
+    <input type="file" id="replayFile" accept=".ndjson,.jsonl,.bin"/>
+    <select id="replayHeat">
+      <option value="players">player path heatmap</option>
+      <option value="mobs">mob density heatmap</option>
+    </select>
+    <input type="number" id="replayCell" value="4" min="1" max="20" step="1" title="heatmap cell size (world units)"/>
+    <span id="replayMeta" class="sub" style="margin:6px">load a recording from tools/replay/recordings/</span>
+  </div>
+  <div class="cards">
+    <div class="card"><div class="k">FRAMES</div><div class="v" id="r-frames">–</div></div>
+    <div class="card"><div class="k">AVG SPEED U/S</div><div class="v" id="r-speed">–</div></div>
+    <div class="card"><div class="k">KILLS / DEATHS</div><div class="v" id="r-kd">–</div></div>
+    <div class="card"><div class="k">TT FIRST KILL</div><div class="v" id="r-ttff">–</div></div>
+    <div class="card"><div class="k">DMG DEALT / TAKEN</div><div class="v" id="r-dmg">–</div></div>
+    <div class="card"><div class="k">MOB PEAK</div><div class="v" id="r-peak">–</div></div>
+    <div class="card"><div class="k">DISCONNECTS</div><div class="v" id="r-disc">–</div></div>
+    <div class="card"><div class="k">CELLS HIT</div><div class="v" id="r-cells">–</div></div>
+  </div>
+  <div class="grid">
+    <div class="panel"><h2>PLAYER PATH HEATMAP</h2><p>occupancy per cell — darker means more samples</p>
+      <canvas id="r-heat" width="480" height="480"></canvas></div>
+    <div class="panel"><h2>REPLAY TIMELINE</h2><p>mobs, players, player speed and HP over the run</p>
+      <canvas id="r-timeline" width="480" height="300"></canvas></div>
+  </div>
+  <div class="grid">
+    <div class="panel"><h2>DISCONNECT POINTS</h2><p>stalled snapshot gaps and client drops</p>
+      <div style="overflow-x:auto"><table id="r-dtable"></table></div></div>
+    <div class="panel"><h2>PER-PLAYER COMBAT</h2><p>the recording client is flagged self</p>
+      <div style="overflow-x:auto"><table id="r-ptable"></table></div></div>
+  </div>
+  <!-- /REPLAY-ANALYTICS -->
+  <div class="cards">
+    <div class="card"><div class="k">CONNECTED</div><div class="v" id="k-conn">–</div></div>
+    <div class="card"><div class="k">CONNECT AVG/P95 MS</div><div class="v" id="k-connms">–</div></div>
+    <div class="card"><div class="k">SNAPSHOTS/S</div><div class="v" id="k-snap">–</div></div>
+    <div class="card"><div class="k">INPUTS/S</div><div class="v" id="k-in">–</div></div>
+  </div>
+  <div class="grid">
+    <div class="panel"><h2>CONNECT_MS HISTOGRAM</h2><p>per-bot TCP+WS handshake time</p><canvas id="c-hist" width="480" height="220"></canvas></div>
+    <div class="panel"><h2>SNAPSHOTS PER BOT</h2><p>~8/s/bot vs 10Hz nominal (win timer dilation)</p><canvas id="c-snap" width="480" height="220"></canvas></div>
+    <div class="panel"><h2>MSGS PER BOT (fan-out)</h2><p>chat rebroadcast dominates at scale</p><canvas id="c-msg" width="480" height="220"></canvas></div>
+    <div class="panel"><h2>INPUTS SENT PER BOT</h2><p>20Hz steering + jitter</p><canvas id="c-in" width="480" height="220"></canvas></div>
+  </div>
+  <div class="panel" style="margin-top:12px"><h2>BOT CSV RAW (first 15 rows)</h2><div style="overflow-x:auto"><table id="tbl"></table></div></div>
+  <div class="foot">Source: <code>node tools/bots/dist/index.js --duration 15</code> → CSV columns
+    <code>bot,name,connect_ms,welcome_ms,snapshots,msgs,inputs_sent,chats_sent,attacks_sent,disconnected,error</code>.
+    See <code>docs/BENCHMARKS.md</code> for the documented 20/50-bot baselines.</div>
+</div>
+<script>
+"use strict";
+const SAMPLE = `bot,name,connect_ms,welcome_ms,snapshots,msgs,inputs_sent,chats_sent,attacks_sent,disconnected,error
+0,bot0,63,76,121,1362,245,18,28,1,""
+1,bot1,43,55,121,1361,245,14,24,1,""
+2,bot2,44,55,121,1360,245,14,17,1,""
+3,bot3,43,55,121,1359,245,11,15,1,""
+4,bot4,43,57,121,1358,245,14,15,1,""`;
+
+function parseCSV(text){
+  const lines = text.trim().split(/\r?\n/);
+  const head = lines[0].split(",");
+  return lines.slice(1).filter(Boolean).map(l=>{
+    // error col is quoted; simple split works for this schema (no commas inside except "")
+    const cells = l.split(",");
+    const o = {}; head.forEach((h,i)=>o[h]=cells[i]);
+    for (const k of ["bot","connect_ms","welcome_ms","snapshots","msgs","inputs_sent","chats_sent","attacks_sent","disconnected"])
+      o[k] = Number(o[k]);
+    return o;
+  });
+}
+function pct(arr,p){ if(!arr.length) return 0; const a=[...arr].sort((x,y)=>x-y); return a[Math.min(a.length-1,Math.floor(p*a.length))]; }
+function avg(arr){ return arr.length? arr.reduce((s,x)=>s+x,0)/arr.length : 0; }
+
+function bar(canvas, values, color){
+  const ctx = canvas.getContext("2d");
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0,0,W,H);
+  if(!values.length){ ctx.fillStyle="#8fa3bf"; ctx.fillText("no data",12,20); return; }
+  const max = Math.max(...values,1);
+  const bw = W/values.length;
+  ctx.fillStyle = color;
+  values.forEach((v,i)=>{
+    const h = (H-24)*(v/max);
+    ctx.fillRect(i*bw+1, H-18-h, Math.max(1,bw-2), h);
+  });
+  ctx.fillStyle="#8fa3bf"; ctx.font="11px system-ui";
+  ctx.fillText(`n=${values.length} max=${max}`, 8, 12);
+}
+function hist(canvas, values, bins=12){
+  const ctx = canvas.getContext("2d");
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0,0,W,H);
+  if(!values.length) return;
+  const min = Math.min(...values), max = Math.max(...values, min+1);
+  const counts = new Array(bins).fill(0);
+  values.forEach(v=>{ const b = Math.min(bins-1, Math.floor((v-min)/(max-min)*bins)); counts[b]++; });
+  const peak = Math.max(...counts,1);
+  const bw = W/bins;
+  ctx.fillStyle = "#4dc3ff";
+  counts.forEach((c,i)=>{ const h=(H-40)*(c/peak); ctx.fillRect(i*bw+2, H-24-h, bw-4, h); });
+  ctx.fillStyle="#8fa3bf"; ctx.font="11px system-ui";
+  ctx.fillText(`${min}ms`, 6, H-8); ctx.fillText(`${max}ms`, W-52, H-8);
+  ctx.fillText(`p50=${pct(values,.5)} p95=${pct(values,.95)}`, 6, 12);
+}
+
+async function load(){
+  const sel = document.getElementById("src").value;
+  const meta = document.getElementById("meta");
+  let text = "";
+  if (sel === "__sample") { text = SAMPLE; meta.textContent = "embedded sample (5 bots)"; }
+  else {
+    try {
+      const r = await fetch(sel);
+      if(!r.ok) throw new Error("http "+r.status);
+      text = await r.text();
+      meta.textContent = sel;
+    } catch(e) {
+      text = SAMPLE; meta.textContent = sel+" unreachable ("+e.message+") — sample fallback";
+    }
+  }
+  const rows = parseCSV(text);
+  const conn = rows.map(r=>r.connect_ms);
+  document.getElementById("k-conn").textContent = `${rows.filter(r=>!r.error).length}/${rows.length}`;
+  document.getElementById("k-connms").textContent = `${avg(conn).toFixed(1)} / ${pct(conn,.95)}`;
+  // duration unknown from CSV; assume 15s baseline like BENCHMARKS.md
+  const totSnap = rows.reduce((s,r)=>s+r.snapshots,0), totIn = rows.reduce((s,r)=>s+r.inputs_sent,0);
+  document.getElementById("k-snap").textContent = (totSnap/15).toFixed(1);
+  document.getElementById("k-in").textContent = (totIn/15).toFixed(1);
+  hist(document.getElementById("c-hist"), conn);
+  bar(document.getElementById("c-snap"), rows.map(r=>r.snapshots), "#59d98c");
+  bar(document.getElementById("c-msg"), rows.map(r=>r.msgs), "#ffb84d");
+  bar(document.getElementById("c-in"), rows.map(r=>r.inputs_sent), "#4dc3ff");
+  const tbl = document.getElementById("tbl");
+  const cols = ["bot","name","connect_ms","welcome_ms","snapshots","msgs","inputs_sent","chats_sent","attacks_sent"];
+  tbl.innerHTML = "<tr>"+cols.map(c=>`<th>${c}</th>`).join("")+"</tr>" +
+    rows.slice(0,15).map(r=>"<tr>"+cols.map(c=>`<td>${r[c]}</td>`).join("")+"</tr>").join("");
+}
+// ===========================================================================
+// REPLAY-ANALYTICS: zero-dep replay metrics (mirrors tools/replay/src/analyze.ts)
+// Same metric definitions as the CLI so the page and the artifacts agree; the
+// CLI stays the source of truth for anything not mirrored here.
+// ===========================================================================
+const REPLAY = (() => {
+  const CELL_PALETTE = ["#0d1b2a","#123a5a","#1a6b7a","#38a169","#f6c343","#ff5252"];
+  const MOB_PALETTE  = ["#140b21","#2d1247","#4c1d78","#7b2fa8","#c14fd6","#ff8ae0"];
+  const MAX_SPEED_BAND = 24;   // 3x server MAX_SPEED (8 u/s)
+  const CREDIT_RADIUS = 3;
+  const MOVING_SPEED = 0.5;
+
+  const enc = new TextEncoder();
+  const dec = new TextDecoder();
+
+  /** Decode the AFRB binary container (little-endian; mirrors container.ts). */
+  function decodeBin(buf) {
+    const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    const tag = String.fromCharCode(buf[0], buf[1], buf[2], buf[3]);
+    if (tag !== "AFRB") throw new Error("bad magic " + tag);
+    const ver = dv.getUint16(4, true);
+    if (ver !== 1) throw new Error("unsupported container version " + ver);
+    dv.getUint16(6, true); // flags
+    const count = dv.getUint32(8, true);
+    let o = 16;
+    const u8 = () => buf[o++];
+    const u16 = () => { const v = dv.getUint16(o, true); o += 2; return v; };
+    const u32 = () => { const v = dv.getUint32(o, true); o += 4; return v; };
+    const i32 = () => { const v = dv.getInt32(o, true); o += 4; return v; };
+    const f64 = () => { const v = dv.getFloat64(o, true); o += 8; return v; };
+    const str = () => { const n = u16(); const s = dec.decode(buf.subarray(o, o + n)); o += n; return s; };
+    const bytes = () => { const n = u32(); const b = buf.subarray(o, o + n); o += n; return b; };
+    const ENTITY_KIND = ["player","npc","mob","pickup","projectile"];
+    const CHANNEL = ["global","guild","say"];
+    const entity = () => {
+      const id = u32();
+      const kind = ENTITY_KIND[u8()] || "mob";
+      const x = f64(), y = f64(), vx = f64(), vy = f64(), hp = f64(), maxHp = f64();
+      const flags = u8();
+      const e = { id, kind, p: { x, y }, v: { x: vx, y: vy }, hp, maxHp };
+      if (flags & 1) e.dir = f64();
+      if (flags & 2) e.level = i32();
+      if (flags & 4) e.name = str();
+      if (flags & 8) e.seq = u32();
+      return e;
+    };
+    const out = [];
+    for (let i = 0; i < count; i++) {
+      const t = u32();
+      const kind = u8();
+      if (kind === 1) {
+        const id = u32(), tick = u32(), n = u16(), snapshot = [];
+        for (let k = 0; k < n; k++) snapshot.push(entity());
+        out.push({ t, msg: { t: "welcome", id, tick, snapshot } });
+      } else if (kind === 2) {
+        const tick = u32(), n = u16(), entities = [];
+        for (let k = 0; k < n; k++) entities.push(entity());
+        const rn = u16(), removed = [];
+        for (let k = 0; k < rn; k++) removed.push(u32());
+        out.push({ t, msg: { t: "snapshot", tick, entities, removed } });
+      } else if (kind === 3) {
+        const channel = CHANNEL[u8()] || "say";
+        const from = str(), text = str();
+        out.push({ t, msg: { t: "chat", from, text, channel } });
+      } else if (kind === 4) {
+        const k = str();
+        const payload = JSON.parse(dec.decode(bytes()));
+        out.push({ t, msg: { t: "event", kind: k, payload } });
+      } else {
+        throw new Error("unknown record kind " + kind);
+      }
+    }
+    return out;
+  }
+
+  function parse(text, bytes) {
+    if (bytes && bytes.length >= 4 && String.fromCharCode(bytes[0],bytes[1],bytes[2],bytes[3]) === "AFRB") {
+      return { records: decodeBin(bytes), malformed: 0, format: "bin" };
+    }
+    const records = [];
+    let malformed = 0;
+    for (const line of text.split("\n")) {
+      const s = line.trim();
+      if (!s) continue;
+      try {
+        const rec = JSON.parse(s);
+        if (!rec || typeof rec !== "object" || !rec.msg) { malformed++; continue; }
+        records.push({ t: Number.isFinite(rec.t) ? rec.t : 0, msg: rec.msg });
+      } catch { malformed++; }
+    }
+    return { records, malformed, format: "ndjson" };
+  }
+
+  const median = (v) => {
+    if (!v.length) return 0;
+    const s = [...v].sort((a, b) => a - b);
+    const m = s.length >> 1;
+    return s.length % 2 ? s[m] : (s[m-1] + s[m]) / 2;
+  };
+
+  function analyze(records, cellOpt) {
+    const cell = Math.max(1, cellOpt || 4);
+    const recs = [...records].sort((a, b) => a.t - b.t);
+    const startT = recs.length ? recs[0].t : 0;
+    const dur = recs.length ? recs[recs.length-1].t - startT : 0;
+
+    // Pre-pass: stall threshold must be known before the walk.
+    const times = recs.filter(r => r.msg.t === "welcome" || r.msg.t === "snapshot").map(r => r.t);
+    const gaps = [];
+    for (let i = 1; i < times.length; i++) { const d = times[i]-times[i-1]; if (d > 0) gaps.push(d); }
+    const med = median(gaps);
+    const threshold = Math.max(500, Math.round(3 * med));
+    const maxJump = Math.max(32, (med / 1000) * 32);
+
+    let selfId = null;
+    let events = 0, chats = 0, mobsKilled = 0, mobDeaths = 0;
+    // Headline combat counters are scoped to the recording client, matching the
+    // CLI report; per-player totals live in the perPlayer table below.
+    let kills = 0, deaths = 0, dealt = 0, taken = 0, uncredited = 0;
+    let firstKillAt = null;
+    const eventCounts = {};
+    const frames = [];
+    const disconnects = [];
+    const hpById = new Map(), posById = new Map();
+    const speeds = [];
+    const perPlayer = new Map();
+    let distance = 0, excluded = 0;
+    let lastRawT = null;
+
+    const acc = (id) => {
+      let p = perPlayer.get(id);
+      if (!p) { p = { id, kills: 0, deaths: 0, dealt: 0, taken: 0, lastDeathT: null }; perPlayer.set(id, p); }
+      return p;
+    };
+    const noteDeath = (id, t) => {
+      const p = acc(id);
+      if (p.lastDeathT !== null && t - p.lastDeathT < 500) return;
+      p.deaths++; p.lastDeathT = t;
+      if (id === selfId) deaths++;
+    };
+
+    for (const rec of recs) {
+      const t = rec.t, rel = t - startT, msg = rec.msg;
+      if (msg.t === "welcome" || msg.t === "snapshot") {
+        const entities = msg.t === "welcome" ? msg.snapshot : msg.entities;
+        if (selfId === null && msg.t === "welcome") selfId = msg.id;
+        const players = entities.filter(e => e.kind === "player");
+        const dtMs = lastRawT === null ? 0 : t - lastRawT;
+        const stale = lastRawT !== null && dtMs > threshold;
+        let spd = 0, hp = 0, maxHp = 0, mobs = 0;
+        for (const e of entities) {
+          if (e.kind === "player") {
+            hp += e.hp; maxHp += e.maxHp;
+            spd += Math.hypot(e.v?.x || 0, e.v?.y || 0);
+          } else if (e.kind === "mob" || e.kind === "npc") mobs++;
+        }
+        if (players.length) spd /= players.length;
+        for (const p of players) {
+          const prev = posById.get(p.id);
+          if (!prev || stale) continue;
+          const d = Math.hypot(p.p.x - prev.x, p.p.y - prev.y);
+          const s = dtMs > 0 ? (d / dtMs) * 1000 : 0;
+          if (d > maxJump || s > MAX_SPEED_BAND) { excluded++; continue; }
+          distance += d;
+          if (dtMs > 0) speeds.push(s);
+        }
+        const nearest = (x, y) => {
+          let id = null, bd = CREDIT_RADIUS;
+          for (const p of players) {
+            const d = Math.hypot(p.p.x - x, p.p.y - y);
+            if (d <= bd) { bd = d; id = p.id; }
+          }
+          return id;
+        };
+        for (const e of entities) {
+          const prev = hpById.get(e.id);
+          if (prev !== undefined && e.hp < prev - 1e-9) {
+            const delta = prev - e.hp;
+            if (e.kind === "player") {
+              acc(e.id).taken += delta;
+              if (e.id === selfId) taken += delta;
+              if (e.hp <= 0) noteDeath(e.id, t);
+            } else if (e.kind === "mob" || e.kind === "npc") {
+              const who = nearest(e.p.x, e.p.y);
+              if (who === null) uncredited += delta;
+              else {
+                acc(who).dealt += delta;
+                if (who === selfId) dealt += delta;
+              }
+              if (e.hp <= 0) {
+                mobDeaths++;
+                if (who === null) {
+                  // Nobody in range to credit: still the first death on record.
+                  if (firstKillAt === null) firstKillAt = rel;
+                } else {
+                  acc(who).kills++;
+                  if (who === selfId) {
+                    kills++;
+                    if (firstKillAt === null) firstKillAt = rel;
+                  }
+                }
+              }
+            }
+          }
+          hpById.set(e.id, e.hp);
+          posById.set(e.id, { x: e.p.x, y: e.p.y });
+        }
+        frames.push({ t: rel, mobs, players: players.length, hp, maxHp, spd, kills, deaths, dealt, taken });
+        lastRawT = t;
+        continue;
+      }
+      if (msg.t === "chat") { chats++; continue; }
+      events++;
+      const k = msg.kind;
+      eventCounts[k] = (eventCounts[k] || 0) + 1;
+      const pay = msg.payload || {};
+      if (k === "mob-die") {
+        mobsKilled++;
+        if (Number(pay.killedBy) === selfId) { kills++; if (firstKillAt === null) firstKillAt = rel; }
+      } else if (k === "respawn") {
+        // A respawn is a teleport to spawn, not movement.
+        noteDeath(Number(pay.id), t);
+        posById.delete(pay.id); hpById.delete(pay.id);
+      } else if (k === "despawn") {
+        if (selfId === null || Number(pay.id) !== selfId) { /* other player churn */ }
+        else disconnects.push({ t: rel, gap: 0, reason: "player-left" });
+      } else if (k === "kicked") {
+        disconnects.push({ t: rel, gap: 0, reason: "kicked" });
+      } else if (k === "redirect") {
+        disconnects.push({ t: rel, gap: 0, reason: "redirect" });
+      }
+    }
+    for (let i = 1; i < times.length; i++) {
+      const dt = times[i] - times[i-1];
+      if (dt > threshold) disconnects.push({ t: times[i-1] - startT, gap: dt, reason: "snapshot-gap" });
+    }
+    disconnects.sort((a, b) => a.t - b.t || a.reason.localeCompare(b.reason));
+
+    // Heatmap grid, auto-fitted to the observed positions.
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const rec of recs) {
+      const m = rec.msg;
+      const ents = m.t === "snapshot" ? m.entities : (m.t === "welcome" ? m.snapshot : null);
+      if (!ents) continue;
+      for (const e of ents) {
+        if (!Number.isFinite(e.p.x) || !Number.isFinite(e.p.y)) continue;
+        minX = Math.min(minX, e.p.x); minY = Math.min(minY, e.p.y);
+        maxX = Math.max(maxX, e.p.x); maxY = Math.max(maxY, e.p.y);
+      }
+    }
+    if (!Number.isFinite(minX)) { minX = 0; minY = 0; maxX = cell; maxY = cell; }
+    const lo = (v) => Math.floor(v / cell) * cell;
+    const hi = (v) => Math.ceil(v / cell) * cell;
+    const ox = lo(minX), oy = lo(minY);
+    const ex = Math.max(hi(maxX), ox + cell), ey = Math.max(hi(maxY), oy + cell);
+    const cols = Math.max(1, Math.round((ex - ox) / cell));
+    const rows = Math.max(1, Math.round((ey - oy) / cell));
+    const pg = new Array(cols * rows).fill(0), mg = new Array(cols * rows).fill(0);
+    for (const rec of recs) {
+      const m = rec.msg;
+      const ents = m.t === "snapshot" ? m.entities : (m.t === "welcome" ? m.snapshot : null);
+      if (!ents) continue;
+      for (const e of ents) {
+        if (!Number.isFinite(e.p.x) || !Number.isFinite(e.p.y)) continue;
+        const c = Math.min(cols-1, Math.max(0, Math.floor((e.p.x - ox) / cell)));
+        const r = Math.min(rows-1, Math.max(0, Math.floor((e.p.y - oy) / cell)));
+        const i = r * cols + c;
+        if (e.kind === "player") pg[i]++;
+        else if (e.kind === "mob" || e.kind === "npc") mg[i]++;
+      }
+    }
+    const maxP = Math.max(0, ...pg), maxM = Math.max(0, ...mg);
+    let occupied = 0;
+    for (let i = 0; i < pg.length; i++) if (pg[i] > 0 || mg[i] > 0) occupied++;
+
+    const sorted = [...speeds].sort((a, b) => a - b);
+    const p95 = sorted.length ? sorted[Math.min(sorted.length-1, Math.max(0, Math.ceil(0.95*sorted.length)-1))] : 0;
+    const peakMobs = frames.length ? Math.max(...frames.map(f => f.mobs)) : 0;
+
+    return {
+      selfId, events, chats, frames: frames.length, dur, cell, ox, oy, cols, rows,
+      pg, mg, maxP, maxM, occupied, eventCounts, disconnects, kills, deaths,
+      dealt, taken, uncredited, mobsKilled, mobDeaths, firstKillAt,
+      avgSpeed: sorted.length ? sorted.reduce((a,b)=>a+b,0)/sorted.length : 0,
+      maxSpeed: sorted.length ? sorted[sorted.length-1] : 0,
+      p95Speed: p95, distance, samples: speeds.length, excluded,
+      movingFraction: speeds.length ? speeds.filter(s => s >= MOVING_SPEED).length / speeds.length : 0,
+      peakMobs, timeline: frames, perPlayer,
+    };
+  }
+
+  function heatColor(v, max, palette) {
+    if (v <= 0 || max <= 0) return palette[0];
+    return palette[Math.min(palette.length-1, Math.max(0, Math.floor((v / max) * palette.length)))];
+  }
+
+  function drawHeat(canvas, rep, which) {
+    const ctx = canvas.getContext("2d");
+    const W = canvas.width, H = canvas.height;
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = "#0b0e14";
+    ctx.fillRect(0, 0, W, H);
+    const grid = which === "mobs" ? rep.mg : rep.pg;
+    const max = which === "mobs" ? rep.maxM : rep.maxP;
+    const palette = which === "mobs" ? MOB_PALETTE : CELL_PALETTE;
+    const size = Math.max(1, Math.min(W, H));
+    const cw = size / rep.cols, ch = size / rep.rows;
+    // Arena y grows downward, so flip rows when drawing.
+    for (let r = 0; r < rep.rows; r++) {
+      for (let c = 0; c < rep.cols; c++) {
+        const v = grid[r * rep.cols + c];
+        if (v <= 0) continue;
+        ctx.fillStyle = heatColor(v, max, palette);
+        ctx.fillRect(c * cw, (rep.rows - 1 - r) * ch, Math.ceil(cw), Math.ceil(ch));
+      }
+    }
+    ctx.strokeStyle = "#2a3547";
+    ctx.strokeRect(0.5, 0.5, size, size);
+    ctx.fillStyle = "#8fa3bf";
+    ctx.font = "11px system-ui";
+    ctx.fillText(`${which === "mobs" ? "mobs" : "players"} max=${max} · ${rep.occupied}/${rep.cols*rep.rows} cells`, 8, 14);
+  }
+
+  function drawTimeline(canvas, rep) {
+    const ctx = canvas.getContext("2d");
+    const W = canvas.width, H = canvas.height;
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = "#0b0e14";
+    ctx.fillRect(0, 0, W, H);
+    const pts = rep.timeline;
+    if (!pts.length) {
+      ctx.fillStyle = "#8fa3bf"; ctx.font = "12px system-ui";
+      ctx.fillText("no frames", 12, 24);
+      return;
+    }
+    const L = 34, R = 8, T = 16, B = 22;
+    const pw = W - L - R, ph = H - T - B;
+    const maxT = pts[pts.length-1].t || 1;
+    let maxY = 1;
+    for (const p of pts) maxY = Math.max(maxY, p.mobs, p.players, p.hp, p.spd);
+    maxY = Math.ceil(maxY);
+    const X = (t) => L + (t / maxT) * pw;
+    const Y = (v) => T + ph - (v / maxY) * ph;
+    ctx.strokeStyle = "#1c2740";
+    for (let i = 0; i <= 4; i++) {
+      const v = (maxY / 4) * i;
+      ctx.beginPath(); ctx.moveTo(L, Y(v)); ctx.lineTo(L + pw, Y(v)); ctx.stroke();
+      ctx.fillStyle = "#7f8ea8"; ctx.font = "10px system-ui"; ctx.textAlign = "right";
+      ctx.fillText(String(Math.round(v)), L - 4, Y(v) + 3);
+    }
+    ctx.textAlign = "center";
+    for (let i = 0; i <= 5; i++) {
+      const t = (maxT / 5) * i;
+      ctx.fillStyle = "#7f8ea8";
+      ctx.fillText((t/1000).toFixed(1)+"s", X(t), H - 6);
+    }
+    const series = [
+      ["mobs", "#ff7a5a"], ["players", "#5aa9ff"], ["spd", "#ffd75a"], ["hp", "#3ddc84"],
+    ];
+    for (const [key, color] of series) {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      pts.forEach((p, i) => { const x = X(p.t), y = Y(p[key]); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+      ctx.stroke();
+    }
+    ctx.textAlign = "left";
+    ctx.fillStyle = "#8fa3bf";
+    ctx.font = "11px system-ui";
+    let lx = L;
+    for (const [key, color] of series) {
+      ctx.fillStyle = color;
+      ctx.fillRect(lx, 6, 8, 3);
+      ctx.fillStyle = "#8fa3bf";
+      ctx.fillText(key, lx + 11, 11);
+      lx += 46;
+    }
+  }
+
+  function renderTable(rep) {
+    const cols = ["t_ms", "reason", "gap_ms"];
+    const rows = rep.disconnects.slice(0, 15).map(d => [d.t, d.reason, d.gap]);
+    document.getElementById("r-dtable").innerHTML =
+      "<tr>" + cols.map(c => `<th>${c}</th>`).join("") + "</tr>" +
+      (rows.length ? rows.map(r => "<tr>" + r.map(c => `<td>${c}</td>`).join("") + "</tr>").join("")
+                   : "<tr><td colspan=3>none</td></tr>");
+
+    const pcols = ["id", "self", "kills", "deaths", "dealt", "taken"];
+    const prows = [...rep.perPlayer.values()]
+      .sort((a, b) => Number(b.id === rep.selfId) - Number(a.id === rep.selfId) || a.id - b.id)
+      .slice(0, 15)
+      .map(p => [p.id, p.id === rep.selfId ? 1 : 0, p.kills, p.deaths, Math.round(p.dealt), Math.round(p.taken)]);
+    document.getElementById("r-ptable").innerHTML =
+      "<tr>" + pcols.map(c => `<th>${c}</th>`).join("") + "</tr>" +
+      (prows.length ? prows.map(r => "<tr>" + r.map(c => `<td>${c}</td>`).join("") + "</tr>").join("")
+                    : "<tr><td colspan=6>no player entities</td></tr>");
+  }
+
+  let lastText = null, lastBytes = null, lastLabel = "";
+
+  function render(rep, label) {
+    document.getElementById("r-frames").textContent = `${rep.frames}`;
+    document.getElementById("r-speed").textContent = `${rep.avgSpeed.toFixed(2)}`;
+    document.getElementById("r-kd").textContent = `${rep.kills} / ${rep.deaths}`;
+    document.getElementById("r-ttff").textContent = rep.firstKillAt === null ? "n/a" : `${(rep.firstKillAt/1000).toFixed(2)}s`;
+    document.getElementById("r-dmg").textContent = `${Math.round(rep.dealt)} / ${Math.round(rep.taken)}`;
+    document.getElementById("r-peak").textContent = `${rep.peakMobs}`;
+    document.getElementById("r-disc").textContent = `${rep.disconnects.length}`;
+    document.getElementById("r-cells").textContent = `${rep.occupied}/${rep.cols*rep.rows}`;
+    const heat = document.getElementById("replayHeat").value;
+    drawHeat(document.getElementById("r-heat"), rep, heat);
+    drawTimeline(document.getElementById("r-timeline"), rep);
+    renderTable(rep);
+    document.getElementById("replayMeta").textContent =
+      `${label} · ${(rep.dur/1000).toFixed(1)}s · mobs killed ${rep.mobsKilled} (${rep.mobDeaths} observed) · ` +
+      `${rep.samples} speed samples, ${rep.excluded} jumps dropped`;
+  }
+
+  function show(text, bytes, label) {
+    lastText = text; lastBytes = bytes; lastLabel = label;
+    const cell = Number(document.getElementById("replayCell").value) || 4;
+    const { records, format } = parse(text ?? "", bytes);
+    if (!records.length) {
+      document.getElementById("replayMeta").textContent = "no records in " + label;
+      return;
+    }
+    render(analyze(records, cell), label + " (" + format + ")");
+  }
+
+  /** Re-render with the current controls (cell size / heat source) applied. */
+  const refresh = () => { if (lastText !== null) show(lastText, lastBytes, lastLabel); };
+
+  document.getElementById("replayFile").addEventListener("change", async (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    const buf = new Uint8Array(await f.arrayBuffer());
+    show(dec.decode(buf), buf, f.name);
+  });
+  document.getElementById("replayHeat").addEventListener("change", refresh);
+  document.getElementById("replayCell").addEventListener("change", refresh);
+
+  return { show, parse, analyze, drawHeat, drawTimeline };
+})();
+
+// Auto-load the bundled trial recording so the panels are populated offline.
+(async () => {
+  try {
+    const r = await fetch("../replay/recordings/trial.ndjson");
+    if (r.ok) REPLAY.show(await r.text(), null, "trial.ndjson");
+  } catch { /* file:// fetch blocked — use the picker */ }
+})();
+
+document.getElementById("reload").onclick = () => { load(); REPLAY.__reload?.(); };
+document.getElementById("src").onchange = () => {
+  load();
+  const sel = document.getElementById("src").value;
+  if (sel.endsWith(".ndjson") || sel.endsWith(".bin")) {
+    fetch(sel).then(async (r) => {
+      if (!r.ok) throw new Error("http " + r.status);
+      const buf = sel.endsWith(".bin") ? new Uint8Array(await r.arrayBuffer()) : null;
+      REPLAY.show(sel.endsWith(".bin") ? new TextDecoder().decode(buf) : await r.text(), buf, sel.split("/").pop());
+    }).catch(() => { /* keep the previous replay rendering */ });
+  }
+};
+document.getElementById("file").onchange = async (e)=>{
+  const f = e.target.files[0]; if(!f) return;
+  const text = await f.text();
+  document.getElementById("meta").textContent = f.name;
+  const rows = parseCSV(text);
+  document.getElementById("src").value = "__sample";
+  const evt = null;
+  // re-render with uploaded rows by temporarily swapping SAMPLE path:
+  document.getElementById("k-conn").textContent = `${rows.length}/${rows.length}`;
+  hist(document.getElementById("c-hist"), rows.map(r=>r.connect_ms));
+  bar(document.getElementById("c-snap"), rows.map(r=>r.snapshots), "#59d98c");
+  bar(document.getElementById("c-msg"), rows.map(r=>r.msgs), "#ffb84d");
+  bar(document.getElementById("c-in"), rows.map(r=>r.inputs_sent), "#4dc3ff");
+  const cols = ["bot","name","connect_ms","welcome_ms","snapshots","msgs","inputs_sent","chats_sent","attacks_sent"];
+  document.getElementById("tbl").innerHTML = "<tr>"+cols.map(c=>`<th>${c}</th>`).join("")+"</tr>" +
+    rows.slice(0,15).map(r=>"<tr>"+cols.map(c=>`<td>${r[c]}</td>`).join("")+"</tr>").join("");
+  const conn = rows.map(r=>r.connect_ms);
+  document.getElementById("k-connms").textContent = `${avg(conn).toFixed(1)} / ${pct(conn,.95)}`;
+  document.getElementById("k-snap").textContent = (rows.reduce((s,r)=>s+r.snapshots,0)/15).toFixed(1);
+  document.getElementById("k-in").textContent = (rows.reduce((s,r)=>s+r.inputs_sent,0)/15).toFixed(1);
+};
+load();
+</script>
+</body>
+</html>
