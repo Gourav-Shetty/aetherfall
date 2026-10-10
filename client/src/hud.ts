@@ -332,11 +332,16 @@ const chan = i18n.t(chanKey) === chanKey ? channel : i18n.t(chanKey);
     else this.onAnnounce({ type: 'chat', from: shownFrom, text });
   }
 
-  addKill(text: string) {
+  /**
+   * Kill-feed line. `marker` is an optional leading glyph so a finisher kill
+   * ("✖") reads differently from a plain one ("☠") without disturbing the
+   * screen-reader announcement, which still parses the unmarked prose.
+   */
+  addKill(text: string, marker = '☠') {
     const d = document.createElement('div');
     d.className = 'feed-item';
     // Server prose ("<name> slain") is translated; plain local copy passes through.
-    d.textContent = '☠ ' + i18n.tServer(text);
+    d.textContent = marker + ' ' + i18n.tServer(text);
     this.feed.prepend(d);
     while (this.feed.children.length > 8) this.feed.removeChild(this.feed.lastChild!);
     setTimeout(() => d.remove(), 6000);

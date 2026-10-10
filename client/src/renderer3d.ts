@@ -2,6 +2,25 @@ import * as THREE from 'three';
 import { ChunkCache, daylightFactor, mulberry32 } from './tiles.js';
 import type { DrawEntity } from './types.js';
 import {
+  DamageNumberPool,
+  DmgMode,
+  FINISHER_LABEL,
+  HIT_FLASH_MOB,
+  HIT_FLASH_PLAYER,
+  HitFlashRing,
+  KILL_FX_MAX,
+  KillBurstStyle,
+  KillFxRing,
+  MobBarInput,
+  RecentDamageRing,
+  SWING_LUNGE,
+  SWING_MS,
+  SwingState,
+  killBurstStyle,
+  mobBarScratch,
+  mobBarVisibleInto,
+} from './feedback.js';
+import {
   TERR_LAVA,
   TERR_NONE,
   TERR_WATER,
@@ -59,6 +78,11 @@ const LANDMARK_COLORS: Record<string, number> = {
 
 /** Rock grey for anything too steep to walk. */
 const CLIFF_COLOR = 0x6b6f78;
+
+/** True for kinds drawn as a standing character (has a body worth twisting). */
+function isCharacter(kind: string): boolean {
+  return kind !== 'pickup' && kind !== 'projectile';
+}
 /** Snow tint applied at the top of the elevation range. */
 const SNOW_COLOR = 0xe8f0ff;
 
@@ -175,6 +199,34 @@ export class IsoRenderer {
   private blood: BloodSplat[] = [];
   /** Downed (crawling) entity ids: set by `mob-downed`, cleared by `mob-up`/`mob-die`. */
   private downedIds = new Set<number>();
+  // ---- combat feedback layer (see feedback.ts) ----
+  /** Pooled damage numbers, capped + time-stepped (never allocates per frame). */
+  private dmg = new DamageNumberPool();
+  /** a11y gate: 'off' drops them, 'short' collapses the rise. */
+  private dmgMode: DmgMode = 'full';
+  /** a11y: motion-free presentation (bursts stop expanding). */
+  private reducedMotion = false;
+  /** 100ms white/red body flashes driven by hit events. */
+  private hitFlashes = new HitFlashRing();
+  /** "took damage recently" markers that gate the world HP bars. */
+  private recent = new RecentDamageRing();
+  /** Reused HP-bar predicate input: the render loop allocates no records. */
+  private barScratch = mobBarScratch();
+  /** Entity id the next swing would resolve against (-1 = none). */
+  private targetId = -1;
+  /** Melee swing lunge + whoosh arc on the local avatar. */
+  private swingState = new SwingState();
+  private swingX = 0;
+  private swingY = 0;
+  /** Fixed pool of whoosh arcs (one mesh each, reused per swing). */
+  private swingArcs: THREE.Mesh<THREE.RingGeometry, THREE.MeshBasicMaterial>[] = [];
+  private swingArcCursor = 0;
+  /** Geometry shared by every whoosh arc (built on first swing). */
+  private swingArcGeo: THREE.RingGeometry | null = null;
+  /** Expanding bright rings on a kill (double ring + gold on a finisher). */
+  private killFx = new KillFxRing();
+  /** Lazily built meshes mirroring killFx (hidden when idle). */
+  private killRings: Array<THREE.Mesh<THREE.RingGeometry, THREE.MeshBasicMaterial> | null> = [];
   /**
    * a11y entity colours. Defaults mirror BODY_COLORS (the shipped palette);
    * setEntityColors() replaces them with a colourblind-safe preset and
@@ -217,6 +269,8 @@ export class IsoRenderer {
   private scratchColor = new THREE.Color();
   private scratchColor2 = new THREE.Color();
   private scratchColor3 = new THREE.Color();
+  /** Hit-flash tint scratch (written per flashing body, never reallocated). */
+  private scratchFlash = new THREE.Color();
   private scratchObj = new THREE.Object3D();
   private scratchVec = new THREE.Vector3();
   private scratchVec2 = new THREE.Vector2();
@@ -357,6 +411,26 @@ export class IsoRenderer {
         (s.mesh.material as THREE.Material).dispose();
       }
       this.blood.length = 0;
+      for (const m of this.swingArcs) {
+        this.scene.remove(m);
+        (m.material as THREE.Material).dispose();
+      }
+      this.swingArcs.length = 0;
+      // The shared arc geometry belongs to the pool, so it is freed here too.
+      this.swingArcGeo?.dispose();
+      this.swingArcGeo = null;
+      for (const m of this.killRings) {
+        if (m === null || m === undefined) continue;
+        this.scene.remove(m);
+        m.geometry.dispose();
+        (m.material as THREE.Material).dispose();
+      }
+      this.killRings.length = 0;
+      this.dmg.clear();
+      this.hitFlashes.clear();
+      this.recent.clear();
+      this.killFx.clear();
+      this.swingState.clear();
       for (const t of this.tele) {
         this.scene.remove(t.g);
         t.g.traverse((o) => {
@@ -995,6 +1069,122 @@ export class IsoRenderer {
     } catch { /* ignore */ }
   }
 
+  /**
+   * Spawn one pooled whoosh arc in front of the player. Geometry is a single
+   * shared partial ring; the arc sweeps through it in place, so a swing costs
+   * two matrix writes and nothing else.
+   */
+  private emitSwingArc(x: number, y: number) {
+    const m = this.acquireSwingArc();
+    const gz = zVisual(this.terrain?.tileHeightAt(x, y) ?? 0);
+    m.position.set(
+      x + this.swingState.dirX * 0.6,
+      gz + 0.25,
+      y + this.swingState.dirY * 0.6,
+    );
+    // 'YXZ' composes as Ry(yaw) * Rx(-90, lay flat) * Rz(sweep), so `yaw`
+    // points the arc down the swing direction in world space and `sweep`
+    // rotates it inside that flat plane.
+    m.rotation.set(-Math.PI / 2, Math.atan2(this.swingState.dirX, this.swingState.dirY), 0, 'YXZ');
+    m.visible = true;
+    (m.material as THREE.MeshBasicMaterial).opacity = 0.85;
+    m.userData['t0'] = performance.now();
+  }
+
+  /** Lazily grow the whoosh pool, reusing idle slots and one shared geometry. */
+  private acquireSwingArc(): THREE.Mesh<THREE.RingGeometry, THREE.MeshBasicMaterial> {
+    const now = performance.now();
+    for (let i = 0; i < this.swingArcs.length; i++) {
+      const m = this.swingArcs[i]!;
+      if (m.visible && now - (m.userData['t0'] as number) < SWING_MS) continue;
+      return m;
+    }
+    let m = this.swingArcs[this.swingArcCursor];
+    if (m === undefined) {
+      m = new THREE.Mesh(
+        this.swingArcGeometry(),
+        new THREE.MeshBasicMaterial({
+          color: 0xffe9a8, transparent: true, opacity: 0.85,
+          side: THREE.DoubleSide, depthWrite: false, depthTest: false,
+          blending: THREE.AdditiveBlending,
+        }),
+      );
+      m.renderOrder = 4;
+      m.frustumCulled = false;
+      this.swingArcCursor = 0;
+      this.scene.add(m);
+      this.swingArcs.push(m);
+      return m;
+    }
+    this.swingArcCursor = (this.swingArcCursor + 1) % this.swingArcs.length;
+    return m;
+  }
+
+  /** One partial ring shared by every whoosh arc in the pool. */
+  private swingArcGeometry(): THREE.RingGeometry {
+    if (this.swingArcGeo === null) {
+      this.swingArcGeo = new THREE.RingGeometry(0.6, 1.15, 18, 1, -0.85, 1.7);
+    }
+    return this.swingArcGeo;
+  }
+
+  /** Sweep + fade the whoosh arcs (once per frame, no allocation). */
+  private stepSwingArcs(nowMs: number) {
+    for (let i = 0; i < this.swingArcs.length; i++) {
+      const m = this.swingArcs[i]!;
+      if (!m.visible) continue;
+      const p = (nowMs - (m.userData['t0'] as number)) / SWING_MS;
+      if (p >= 1) {
+        m.visible = false;
+        continue;
+      }
+      const mat = m.material as THREE.MeshBasicMaterial;
+      mat.opacity = 0.85 * (1 - p);
+      // The arc sweeps across its own plane while it grows a touch.
+      m.rotation.z = -0.9 + 1.8 * p;
+      const s = 0.75 + 0.4 * p;
+      m.scale.set(s, s, 1);
+    }
+  }
+
+  /**
+   * Sync the pooled kill-burst rings onto scene meshes. Meshes are created
+   * lazily on the first kill (so a quiet scene keeps its draw-call budget) and
+   * then reused; a finished ring is hidden rather than destroyed.
+   */
+  private stepKillRings(timeMs: number) {
+    for (let i = 0; i < KILL_FX_MAX; i++) {
+      const k = this.killFx.at(i);
+      let m = this.killRings[i] ?? null;
+      if (!k.active) {
+        if (m !== null) m.visible = false;
+        continue;
+      }
+      if (m === null) {
+        m = new THREE.Mesh(
+          new THREE.RingGeometry(0.55, 0.85, 32),
+          new THREE.MeshBasicMaterial({
+            color: 0xffe9a8, transparent: true, opacity: 0.9,
+            side: THREE.DoubleSide, depthWrite: false, depthTest: false,
+            blending: THREE.AdditiveBlending,
+          }),
+        );
+        m.rotation.x = -Math.PI / 2;
+        m.renderOrder = 3;
+        this.scene.add(m);
+        this.killRings[i] = m;
+      }
+      const p = Math.max(0, Math.min(1, (timeMs - k.t0) / k.lifeMs));
+      const s = Math.max(0.05, k.r0 * (0.25 + 1.45 * p));
+      m.visible = true;
+      m.position.set(k.x, zVisual(this.terrain?.tileHeightAt(k.x, k.y) ?? 0) + 0.12, k.y);
+      m.scale.setScalar(s);
+      const mat = m.material as THREE.MeshBasicMaterial;
+      mat.color.set(k.color);
+      mat.opacity = 0.9 * (1 - p);
+    }
+  }
+
   /** Short-lived ring flash for attacks/hits (world x,y). Capped for perf. */
   flash(x: number, y: number, color = 0xffffff, z?: number) {
     if (this.flashes.length >= this.maxFlashes) {
@@ -1019,6 +1209,17 @@ export class IsoRenderer {
     if (this.bursts === null) return;
     const gz = (z ?? this.terrain?.tileHeightAt(x, y) ?? 0) * TERRAIN_Z_SCALE;
     this.bursts.burst(x, gz, y, color, 8);
+  }
+
+  /**
+   * Small pooled spark at a hit position. This is the impact cue that survives
+   * with the damage numbers switched off (a11y), so a landing hit always has
+   * something to see.
+   */
+  impactBurst(x: number, y: number, color = 0xfff2b0, z?: number, n = 6) {
+    if (this.bursts === null) return;
+    const gz = (z ?? this.terrain?.tileHeightAt(x, y) ?? 0) * TERRAIN_Z_SCALE;
+    this.bursts.burst(x, gz, y, color, n);
   }
 
   /** Level-up beam at a world position (reuses the single beam mesh). */
@@ -1190,6 +1391,119 @@ export class IsoRenderer {
     return this.downedIds.has(id);
   }
 
+  // -------------------------------------------------------------- feedback --
+
+  /**
+   * a11y gate for the floating damage numbers (see damageNumberMode):
+   * 'off' removes them entirely, 'short' keeps the text but kills the rise.
+   * The HUD HP bar, world HP bars, hit flash, shake and audio all carry the
+   * same information, so nothing is lost when they are switched off.
+   */
+  setDamageNumberMode(mode: DmgMode) {
+    this.dmgMode = mode === 'off' ? 'off' : mode === 'short' ? 'short' : 'full';
+    if (this.dmgMode === 'off') this.dmg.clear();
+  }
+
+  /** Current damage-number presentation mode (tests). */
+  damageNumberMode(): DmgMode {
+    return this.dmgMode;
+  }
+
+  /**
+   * The pooled damage numbers. The three channel draws them as a pooled DOM
+   * overlay (floaters.ts) rather than in-scene text, so main.ts reads this
+   * pool once per frame; the data + presentation rules are the same ones the
+   * Canvas2D renderer paints directly.
+   */
+  damageNumbers(): DamageNumberPool {
+    return this.dmg;
+  }
+
+  /**
+   * Hit flash: the struck body flares for ~100ms. Mob hits flare white, the
+   * player flares red, so "I hit it" and "it hit me" never look alike.
+   */
+  hitFlash(id: number, taken = false, nowMs?: number) {
+    const t = nowMs ?? performance.now();
+    this.hitFlashes.flash(id, taken ? HIT_FLASH_PLAYER : HIT_FLASH_MOB, t);
+    if (!taken) this.recent.mark(id, t);
+  }
+
+  /** Mark an entity as "recently damaged" so its world HP bar stays up. */
+  markDamaged(id: number, nowMs?: number) {
+    this.recent.mark(id, nowMs ?? performance.now());
+  }
+
+  /**
+   * Finisher marker: the executing swing removed no HP worth printing, so a
+   * labelled number rides the gold burst instead. It lands in the same pool
+   * the DOM overlay reads, so it honours the cap and the a11y gate.
+   */
+  finisher(x: number, y: number, nowMs?: number): boolean {
+    return this.dmg.spawnLabel(x, y, FINISHER_LABEL, 'finisher', nowMs ?? performance.now(), this.dmgMode);
+  }
+
+  /** Entity whose HP bar is forced visible (the predicted melee target). */
+  setTarget(id: number) {
+    this.targetId = Number.isInteger(id) ? id : -1;
+  }
+
+  /**
+   * Play the melee swing: a short forward lunge plus a whoosh arc in front of
+   * the player. Gated to the 800ms server cadence so the animation means "a
+   * swing the server will accept", not "a key was pressed".
+   */
+  swing(px: number, py: number, dirX: number, dirY: number, nowMs?: number): boolean {
+    const started = this.swingState.swing(dirX, dirY, nowMs ?? performance.now());
+    if (!started) return false;
+    this.swingX = px;
+    this.swingY = py;
+    // a11y: reduced motion keeps the swing audio cue, drops the sweeping arc.
+    if (!this.reducedMotion) this.emitSwingArc(px, py);
+    return true;
+  }
+
+  /** True while the swing lunge / whoosh arc is playing. */
+  isSwinging(nowMs?: number): boolean {
+    return this.swingState.isActive(nowMs ?? performance.now());
+  }
+
+  /**
+   * a11y: reduced motion. The kill burst stops expanding and stops throwing
+   * particles; it still flashes its rings so the kill is confirmed without
+   * anything travelling across the screen.
+   */
+  setReducedMotion(on: boolean): void {
+    this.reducedMotion = on;
+  }
+
+  /** Current reduced-motion flag (tests). */
+  isReducedMotion(): boolean {
+    return this.reducedMotion;
+  }
+
+  /**
+   * Kill confirmation: a bright expanding ring (double + gold on a finisher)
+   * on top of the blood decal, plus a particle burst sized by the style.
+   */
+  killBurst(x: number, y: number, finisher = false, nowMs?: number): KillBurstStyle {
+    const t = nowMs ?? performance.now();
+    const style = killBurstStyle(finisher);
+    const rings = this.reducedMotion ? { ...style, ringScale: 1, lifeMs: 160 } : style;
+    this.killFx.spawn(x, y, rings, t);
+    if (!this.reducedMotion) {
+      const gz = (this.terrain?.tileHeightAt(x, y) ?? 0) * TERRAIN_Z_SCALE;
+      this.bursts?.burst(x, gz, y, Math.floor(Number.parseInt(style.color.slice(1), 16)) || 0xffe9a8, style.particles);
+    }
+    if (finisher) {
+      // A second, wider ring + a tighter core ring: the finisher silhouette is
+      // two rings, a plain kill is one.
+      this.killFx.spawn(x, y, { ...rings, ringScale: rings.ringScale * 1.5, lifeMs: rings.lifeMs * 0.8 }, t);
+      this.killFx.spawn(x, y, { ...rings, ringScale: rings.ringScale * 0.62, lifeMs: rings.lifeMs * 0.7 }, t);
+    }
+    return style;
+  }
+
   project(x: number, y: number, z?: number): { sx: number; sy: number } {
     const v = this.scratchOut;
     v.set(x, (z ?? 0) * TERRAIN_Z_SCALE + 1.6, y).project(this.camera);
@@ -1312,13 +1626,44 @@ export class IsoRenderer {
 
     const alive = this.aliveSet;
     alive.clear();
+    // Feedback step: expire flashes/markers, advance damage numbers + whooshes.
+    this.hitFlashes.step(timeMs);
+    this.recent.step(timeMs);
+    this.dmg.step(timeMs);
+    this.killFx.step(timeMs);
+    this.stepSwingArcs(timeMs);
+    this.stepKillRings(timeMs);
+    const swingEnv = this.swingState.envelope(timeMs);
     for (const e of ents) {
       alive.add(e.id);
       let b = this.bodies.get(e.id);
       if (!b) { b = this.makeBody(e); this.bodies.set(e.id, b); }
       // TERRAIN: stand the avatar on the ground (server `z`, else local field).
       const gz = this.entityZ(e);
-      b.refs.group.position.set(e.x, gz, e.y);
+      // SWING: the local avatar lunges along the swing direction so the 800ms
+      // cadence is visible instead of an invisible keypress.
+      if (e.isLocal && swingEnv > 0 && !this.reducedMotion) {
+        b.refs.group.position.set(
+          e.x + this.swingState.dirX * SWING_LUNGE * swingEnv,
+          gz,
+          e.y + this.swingState.dirY * SWING_LUNGE * swingEnv,
+        );
+      } else {
+        b.refs.group.position.set(e.x, gz, e.y);
+      }
+      // SWING: twist the body through the swing arc while the envelope runs.
+      // Only characters are touched — pickups and projectiles own their own
+      // rotation (see the projectile spin below), and zeroing it here would
+      // stall their spin.
+      if (isCharacter(e.kind)) {
+        if (e.isLocal && swingEnv > 0 && !this.reducedMotion) {
+          b.refs.body.rotation.y = (swingEnv - 0.5) * 2.4;
+          b.refs.body.rotation.z = -swingEnv * 0.35;
+        } else {
+          b.refs.body.rotation.y = 0;
+          b.refs.body.rotation.z = 0;
+        }
+      }
       // DOWNED crawl (server `mob-downed`): flattened avatar while the crawl
       // timer runs. animateAvatar() never writes group.scale (only children),
       // so this composes with the walk bob instead of fighting it.
@@ -1339,10 +1684,19 @@ export class IsoRenderer {
         dim = tier === 0 ? 1 : tier === 1 ? 0.45 : 0.15;
       }
       b.refs.bodyMat.color.setHex(b.baseColor).multiplyScalar(dim);
+      // HIT FLASH: 100ms flare on the struck body (white on a mob, red on the
+      // player). Lerped in after the fog tint so the flash is never dimmed out.
+      const flash = this.hitFlashes.strengthFor(e.id, timeMs);
+      if (flash > 0) {
+        this.scratchFlash.setHex(this.hitFlashes.tintFor(e.id));
+        b.refs.bodyMat.color.lerp(this.scratchFlash, flash);
+      }
       // Vocation base disc: class colour when sworn, else the team colour.
       const vocColor = e.vocation ? this.vocationColors[e.vocation] : undefined;
       b.refs.baseMat.color.setHex(vocColor ?? b.teamColor).multiplyScalar(dim);
+      if (flash > 0) b.refs.baseMat.color.lerp(this.scratchFlash, flash * 0.7);
       b.refs.headMat.color.setHex(0xf2c89b).multiplyScalar(dim);
+      if (flash > 0) b.refs.headMat.color.lerp(this.scratchFlash, flash * 0.8);
       // Projectile tracers: additive glow + periodic ember trail.
       if (isProj) {
         b.refs.body.rotation.y += dt * 6;
@@ -1352,12 +1706,22 @@ export class IsoRenderer {
         }
       }
       if (!isPickup && !isProj && b.refs.hpFg !== null && b.refs.hpBg !== null) {
-        const frac = e.maxHp > 0 ? Math.max(0, e.hp / e.maxHp) : 0;
-        b.refs.hpFg.scale.set(1.2 * frac, 0.12, 1);
-        (b.refs.hpFg.material as THREE.SpriteMaterial).color.set(frac > 0.5 ? 0x51ff7a : frac > 0.25 ? 0xffb84d : 0xff5252);
-        const hpDim = 0.35 + 0.65 * dim;
-        (b.refs.hpBg.material as THREE.SpriteMaterial).opacity = hpDim;
-        (b.refs.hpFg.material as THREE.SpriteMaterial).opacity = hpDim;
+        // HP bar — gated: only a mob that was hit recently or is the current
+        // melee target wears one, so a quiet field is not a wall of green.
+        const showBar = mobBarVisibleInto(
+          this.barScratch, e.hp, e.maxHp, this.recent.lastAt(e.id),
+          e.id === this.targetId, timeMs, e.isLocal,
+        );
+        b.refs.hpBg.visible = showBar;
+        b.refs.hpFg.visible = showBar;
+        if (showBar) {
+          const frac = e.maxHp > 0 ? Math.max(0, e.hp / e.maxHp) : 0;
+          b.refs.hpFg.scale.set(1.2 * frac, 0.12, 1);
+          (b.refs.hpFg.material as THREE.SpriteMaterial).color.set(frac > 0.5 ? 0x51ff7a : frac > 0.25 ? 0xffb84d : 0xff5252);
+          const hpDim = 0.35 + 0.65 * dim;
+          (b.refs.hpBg.material as THREE.SpriteMaterial).opacity = hpDim;
+          (b.refs.hpFg.material as THREE.SpriteMaterial).opacity = hpDim;
+        }
       }
       b.lastBX = e.x;
       b.lastBZ = e.y;

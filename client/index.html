@@ -34,6 +34,9 @@ a{color:var(--acc2)}
 #labels{position:absolute;inset:0;overflow:hidden;pointer-events:none;display:none}
 .nametag{position:absolute;transform:translate(-50%,-100%);font-size:11px;color:#fff;text-shadow:0 1px 2px #000;white-space:nowrap}
 .float{position:absolute;transform:translate(-50%,-50%);font-weight:700;font-size:14px;text-shadow:0 1px 2px #000;animation:floatUp .9s ease-out forwards;pointer-events:none}
+/* Pooled damage numbers (FloatTextLayer): JS drives transform+opacity per
+   frame, so the CSS keyframe must not fight it. Reused nodes, never rebuilt. */
+.float.af-pool{animation:none;white-space:nowrap;line-height:1;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}
 @keyframes floatUp{to{transform:translate(-50%,-180%);opacity:0}}
 #hud{position:absolute;inset:0;pointer-events:none;font-size:12px;z-index:5}
 /* vitals bottom-center + quest top-left + map top-right (same DOM ids, CSS layout only) */

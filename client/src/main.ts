@@ -26,6 +26,17 @@ import { VOCATION_COLORS, nametagFor } from './masks.js';
 import { EmoteBubbleLayer, PartyPanel, TalentPanel, VendorPanel } from './panels.js';
 import { TerrainView, zVisual } from './terrain_view.js';
 import { AssetLoader, DEFAULT_ART } from './assets.js';
+// FEEDBACK: the combat feel layer. Pure rules live in feedback.ts (pooled
+// damage numbers, HP-bar gating, hit flashes, swing cadence, kill bursts) and
+// are shared by both renderers so the two channels cannot drift apart.
+import {
+  HeavyHitTracker,
+  DamageKind,
+  damageNumberMode,
+  pickMeleeTarget,
+  type DmgMode,
+} from './feedback.js';
+import { FloatTextLayer } from './floaters.js';
 import {
   a11y, i18n, MOVE_KEYMAPS, moveVector, keyLabel, movementConflicts, isValidKeyCode, hexToRgb,
   type Locale, type MoveScheme, type PaletteMode,
@@ -121,6 +132,16 @@ function projectWorld(x: number, y: number): { sx: number; sy: number } {
   return { sx: 0, sy: 0 };
 }
 
+/**
+ * World -> screen for the damage-number overlay. Unlike `projectWorld` this
+ * takes the caller's own ground height, so a number spawned on a hillside
+ * sticks to that hillside instead of drifting down to the water line.
+ */
+function projectWorldFloat(x: number, y: number, z: number): { sx: number; sy: number } {
+  if (iso && activeMode === 'three') return iso.project(x, y, z);
+  return { sx: 0, sy: 0 };
+}
+
 /** Panels open on demand so they never obscure the HUD by default. */
 function openPanel(id: 'af-party' | 'af-vendor' | 'af-talents'): void {
   const el = document.getElementById(id);
@@ -162,12 +183,16 @@ function showCanvas(): CanvasRenderer {
   labelsEl.style.display = 'none';
   labelsEl.innerHTML = '';
   labelPool.clear();
+  // The pooled damage-number divs live in #labels too; drop them so a later
+  // switch back to three rebuilds clean nodes instead of reusing detached ones.
+  floaters.reset();
   canvas.style.display = 'block';
   if (!c2d) c2d = new CanvasRenderer(canvas, terrain);
   c2d.setTerrain(terrain);
   c2d.fitToContainer();
   activeMode = 'canvas';
   applyPalette();
+  applyFeedbackSettings();
   return c2d;
 }
 
@@ -184,6 +209,7 @@ function showThree(): IsoRenderer | null {
     activeMode = 'three';
     applySettings();
     applyPalette();
+    applyFeedbackSettings();
     return iso;
   } catch {
     return null;
@@ -257,6 +283,63 @@ function shake(amount: number) {
   if (s === 0) return;
   if (iso && activeMode === 'three') iso.shake(s);
   else if (c2d) c2d.shake(s * 12);
+}
+
+// ---- combat feedback dispatch ----
+// Every helper routes to whichever renderer is live, so the feedback layer is
+// written once and both channels behave identically.
+/** Pooled DOM damage-number overlay for the three.js channel. */
+const floaters = new FloatTextLayer(labelsEl);
+/** Learns the player's typical swing damage to spot heavy/crit hits. */
+const heavyHits = new HeavyHitTracker();
+/** Last melee target pushed to the renderers (drives the "my target" HP bar). */
+let currentTarget = -1;
+
+/**
+ * a11y gate for the floating damage numbers. High contrast removes them, and
+ * reduced motion collapses them to a motionless hold. The HUD HP bar, the
+ * world HP bars, the hit flash, the impact spark, the shake and the audio cue
+ * all carry the same information, so nothing is lost either way.
+ */
+function applyFeedbackSettings(): void {
+  const s = a11y.get();
+  const mode: DmgMode = damageNumberMode({ reducedMotion: s.reducedMotion, highContrast: s.highContrast });
+  c2d?.setDamageNumberMode(mode);
+  iso?.setDamageNumberMode(mode);
+  c2d?.setReducedMotion(s.reducedMotion);
+  iso?.setReducedMotion(s.reducedMotion);
+  floaters.setMode(mode);
+}
+
+/** Spawn a damage number on the active channel. */
+function showDamage(x: number, y: number, amount: number, kind: DamageKind, followId = -1) {
+  if (activeMode === 'canvas' && c2d) c2d.damage(x, y, amount, kind, undefined, followId);
+  else floaters.spawn(x, y, amount, kind, undefined, followId);
+}
+
+/** Finisher marker — the execution removed no HP, so it is labelled, not numbered. */
+function showFinisher(x: number, y: number) {
+  if (activeMode === 'canvas' && c2d) c2d.finisher(x, y);
+  else floaters.spawnFinisher(x, y);
+}
+
+/** 100ms body flare: white when the player hits something, red when hit. */
+function showHitFlash(id: number, taken: boolean) {
+  if (activeMode === 'canvas' && c2d) c2d.hitFlash(id, taken);
+  else iso?.hitFlash(id, taken);
+}
+
+/** Non-textual impact cue so a hit reads with the numbers switched off. */
+function showImpact(x: number, y: number, taken: boolean) {
+  if (!a11y.motionEnabled()) return;
+  if (activeMode === 'canvas' && c2d) c2d.burst(x, y, taken ? '#ff8080' : '#fff2b0', taken ? 8 : 6);
+  else iso?.impactBurst(x, y, taken ? 0xff8080 : 0xfff2b0);
+}
+
+/** Bright kill burst on the corpse; finishers read distinctly (see killBurstStyle). */
+function showKillBurst(x: number, y: number, finisher: boolean) {
+  if (activeMode === 'canvas' && c2d) c2d.killBurst(x, y, finisher);
+  else iso?.killBurst(x, y, finisher);
 }
 
 // ---- first-join tutorial (sessionStorage so a reload does not re-teach) ----
@@ -356,11 +439,16 @@ setInterval(() => {
 
 function swingFx() {
   sound.attack();
-  // a11y: reduced motion suppresses particle bursts (the audio cue remains).
+  // FEEDBACK: the swing animation is gated to the 800ms server cadence, so it
+  // means "a swing the server will actually resolve" rather than "a key went
+  // down". Mashing still whooshes (the sound), but only a committed swing
+  // lunges. Reduced motion keeps the audio cue and drops the motion.
   if (!a11y.motionEnabled()) return;
-  const px = pred.pos.x + lastMove.x * 0.9, py = pred.pos.y + lastMove.y * 0.9;
-  if (c2d && activeMode === 'canvas') c2d.burst(px, py, '#fff2b0', 6);
-  if (iso && activeMode === 'three') iso.flash(px, py, 0xfff2b0);
+  const px = pred.pos.x, py = pred.pos.y;
+  // Each renderer owns its own swing fx (2D: lunge + arc + spark; 3D: lunge +
+  // body twist + whoosh arc), so this only has to hand over the direction.
+  if (activeMode === 'canvas' && c2d) c2d.swing(px, py, lastMove.x, lastMove.y);
+  else iso?.swing(px, py, lastMove.x, lastMove.y);
 }
 
 // Mobile attack button.
@@ -471,8 +559,9 @@ el('a11y-close')?.addEventListener('click', () => { sound.click(); closeA11yPane
 // Live regions + theme attributes on <html>.
 a11y.install(document);
 // A palette change must reach the HUD colour table AND both renderers
-// immediately (entity bodies + telegraph rings, not just the minimap).
-a11y.onChange = () => { applyPalette(); hud.relocalize(); syncA11yPanel(); };
+// immediately (entity bodies + telegraph rings, not just the minimap). The
+// a11y motion/contrast flags also re-gate the floating damage numbers.
+a11y.onChange = () => { applyPalette(); applyFeedbackSettings(); hud.relocalize(); syncA11yPanel(); };
 
 /** Push the active colourblind-safe palette into whichever renderer is live. */
 function applyPalette(): void {
@@ -755,17 +844,24 @@ net.onSnapshot = () => {
     if (prev !== undefined && e.hp < prev) {
       const dmgAmt = prev - e.hp;
       const pos = id === net.id ? pred.pos : e.p;
-      if (activeMode === 'canvas' && c2d) {
-        c2d.damage(pos.x, pos.y, `-${dmgAmt}`);
-        c2d.burst(pos.x, pos.y, '#ff6b6b', 8);
-      } else if (iso) {
-        iso.flash(pos.x, pos.y, 0xff5252);
-        floatText(pos.x, pos.y, `-${dmgAmt}`, '#ff8080');
-      }
       if (id === net.id) {
+        // Damage the PLAYER takes: a red number anchored to their own sprite,
+        // a red body flash, the vignette, the shake and the hit sound. The
+        // number is only one of five cues — none of them depends on it.
+        showDamage(pos.x, pos.y, dmgAmt, 'taken', net.id);
+        showHitFlash(id, true);
+        showImpact(pos.x, pos.y, true);
         damageVignette(Math.min(2, dmgAmt / 12));
         shake(Math.min(0.7, dmgAmt / 22));
         sound.hit();
+      } else {
+        // Damage the player deals: white by default, gold + larger when the
+        // hit is far above their own recent average (the server never flags a
+        // crit on the wire, so the client reads one out of its own history).
+        const heavy = heavyHits.observe(dmgAmt);
+        showDamage(pos.x, pos.y, dmgAmt, heavy ? 'crit' : 'normal');
+        showHitFlash(id, false);
+        showImpact(pos.x, pos.y, false);
       }
     }
     prevHp.set(id, e.hp);
@@ -896,6 +992,8 @@ net.onEvent = (kind, payload) => {
     // --- kills ---
     case 'mob-die': {
       const id = num('id');
+      // The server flags a finisher (melee execution on a downed mob).
+      const finisher = p?.['finisher'] === true;
       if (id !== null) {
         announcedDeaths.add(id);
         // Combat feel: floor blood at the corpse + clear the crawl mark, for
@@ -904,23 +1002,28 @@ net.onEvent = (kind, payload) => {
         if (corpse && Number.isFinite(corpse.p.x) && Number.isFinite(corpse.p.y)) {
           if (c2d) c2d.addBlood(corpse.p.x, corpse.p.y);
           if (iso) iso.addBlood(corpse.p.x, corpse.p.y);
+          // Kill confirmation: a bright expanding burst on top of the decal.
+          // A finisher gets a bigger, double gold burst (see killBurstStyle).
+          showKillBurst(corpse.p.x, corpse.p.y, finisher);
+          if (finisher) showFinisher(corpse.p.x, corpse.p.y);
         }
         c2d?.clearDowned(id);
         iso?.clearDowned(id);
+        if (id === currentTarget) currentTarget = -1;
       }
       if (!forMe()) break;
       const killedBy = num('killedBy');
       const mine = killedBy === net.id;
       const nm = id !== null ? (nameMap.get(id) ?? '#' + id) : 'a foe';
       if (mine) {
-        hud.addKill(`${nm} slain`);
+        hud.addKill(`${nm} slain`, finisher ? '✖' : '☠');
         if (chain.onMobDie(true, null)) hud.setQuests(chain.toHud());
         if (!firstBlood) { firstBlood = true; sound.quest(); } else sound.kill();
       } else {
-        hud.addKill(`${nm} has fallen`);
+        hud.addKill(`${nm} has fallen`, finisher ? '✖' : '☠');
       }
       // Finishers hit harder (gated by reduced motion inside shake()).
-      if (p?.['finisher'] === true) shake(1.0);
+      if (finisher) shake(1.0);
       break;
     }
     // --- close-quarters finish loop (server game/melee + ai/npc) ---
@@ -1016,6 +1119,7 @@ net.onEvent = (kind, payload) => {
         hud.addKill(`🏆 ${name} felled`);
         toast(i18n.t('toast.bossFelled', { name }), 3600);
         a11y.announce({ type: 'raw', text: i18n.t('toast.bossFelled', { name }) });
+        const bossFinisher = p?.['finisher'] === true;
         sound.kill();
         // Combat feel: blood at the reported position + clear the crawl mark.
         const bx = num('x');
@@ -1023,6 +1127,9 @@ net.onEvent = (kind, payload) => {
         if (bx !== null && by !== null) {
           if (c2d) c2d.addBlood(bx, by);
           if (iso) iso.addBlood(bx, by);
+          // Boss kills get the same bright confirmation as any mob kill.
+          showKillBurst(bx, by, bossFinisher);
+          if (bossFinisher) showFinisher(bx, by);
         }
         const bid = num('id');
         if (bid !== null) {
@@ -1030,7 +1137,7 @@ net.onEvent = (kind, payload) => {
           iso?.clearDowned(bid);
         }
         // Finishers hit harder (gated by reduced motion inside shake()).
-        if (p?.['finisher'] === true) shake(1.0);
+        if (bossFinisher) shake(1.0);
         else if (iso && activeMode === 'three') iso.shake(0.6);
         else if (c2d) c2d.shake(8);
       }
@@ -1207,19 +1314,6 @@ let lastFrame = performance.now();
 let fpsEma = 60, lastStatus = 0, lastMap = 0, lastLb = 0, lastBoss = 0;
 let fpsFrames = 0, fpsWindowStart = performance.now(), lowFpsWindows = 0;
 
-function floatText(x: number, y: number, text: string, color: string) {
-  if (!iso || activeMode !== 'three') return;
-  const p = iso.project(x, y);
-  const d = document.createElement('div');
-  d.className = 'float';
-  d.textContent = text;
-  d.style.color = color;
-  d.style.left = p.sx + 'px';
-  d.style.top = p.sy + 'px';
-  labelsEl.appendChild(d);
-  setTimeout(() => d.remove(), 950);
-}
-
 function updateLabels(list: DrawEntity[]) {
   if (!iso || activeMode !== 'three') return;
   const seen = new Set<number>();
@@ -1311,10 +1405,23 @@ function frame(now: number) {
   // not lag behind the camera by a reconciliation step.
   const fogOpts = { fog, playerX: pred.pos.x, playerY: pred.pos.y };
 
+  // FEEDBACK: publish the mob the next swing would resolve against so its HP
+  // bar comes up before the first hit lands. Mirrors the server's
+  // nearestMobWithin + inReachOf, so the bar never promises a target the swing
+  // would refuse.
+  const nextTarget = pickMeleeTarget(list, pred.pos.x, pred.pos.y);
+  if (nextTarget !== currentTarget) {
+    currentTarget = nextTarget;
+    c2d?.setTarget(nextTarget);
+    iso?.setTarget(nextTarget);
+  }
+
   if (iso && activeMode === 'three') {
     iso.setFog(fog, pred.pos.x, pred.pos.y);
     iso.update(list, cam.x, cam.y, now);
     updateLabels(list);
+    // Pooled damage-number overlay (three has no text pass of its own).
+    floaters.update(now, list, projectWorldFloat, (x, y) => zVisual(terrain.tileHeightAt(x, y)));
   } else if (c2d) {
     c2d.render(list, cam.x, cam.y, now, editor.active ? editor.walls : undefined, fogOpts);
   }

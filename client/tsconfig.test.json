@@ -54,6 +54,12 @@
     "src/assets.ts",
     "src/assets.test.ts",
     "src/static.test.ts",
-    "src/combat_feel.test.ts"
+    "src/combat_feel.test.ts",
+    "src/feedback.ts",
+    "src/floaters.ts",
+    "src/feedback.test.ts",
+    "src/feedback_pool.test.ts",
+    "src/feedback_render.test.ts",
+    "src/floaters.test.ts"
   ]
 }

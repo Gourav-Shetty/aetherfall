@@ -38,7 +38,12 @@ export class Ctx2D {
   moveTo(...a: unknown[]) { this.rec('moveTo', ...a); }
   lineTo(...a: unknown[]) { this.rec('lineTo', ...a); }
   beginPath2() { /* unused */ }
-  roundRect(...a: unknown[]) { this.rec('roundRect', ...a); }
+  /**
+   * `roundRect` records the active `globalAlpha` and `fillStyle` as trailing
+   * arguments, mirroring `fillRect`, so tests can identify a tinted body pass
+   * (the combat hit flash) without replaying the whole call sequence.
+   */
+  roundRect(...a: unknown[]) { this.rec('roundRect', ...a, this.globalAlpha, this.fillStyle); }
   measureText(t: string) { return { width: t.length * 6 }; }
   count(op: string): number { return this.calls.filter((c) => c.op === op).length; }
 }

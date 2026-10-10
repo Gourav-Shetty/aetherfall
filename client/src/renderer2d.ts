@@ -4,6 +4,27 @@ import type { FogLike, RenderOpts } from './fog.js';
 import { hexToRgb } from './a11y.js';
 import { VOCATION_COLORS, maskGlyphFor } from './masks.js';
 import {
+  DAMAGE_STYLES,
+  DamageNumberPool,
+  DmgMode,
+  DamageKind,
+  FINISHER_LABEL,
+  HIT_FLASH_MOB,
+  HIT_FLASH_PLAYER,
+  HitFlashRing,
+  KILL_FX_MAX,
+  KillBurstStyle,
+  KillFxRing,
+  MobBarInput,
+  RecentDamageRing,
+  SWING_LUNGE,
+  SwingState,
+  damageNumberText,
+  killBurstStyle,
+  mobBarScratch,
+  mobBarVisibleInto,
+} from './feedback.js';
+import {
   TERR_LAVA,
   TERR_NONE,
   TERR_WATER,
@@ -27,7 +48,6 @@ const CLIFF = '#39414c';
 const SNOW = '#c9d6e4';
 
 interface Particle { x: number; y: number; vx: number; vy: number; life: number; max: number; color: string; size: number; }
-interface DmgNum { x: number; y: number; text: string; life: number; max: number; color: string; }
 interface Telegraph { x: number; y: number; r: number; ttlMs: number; t0: number; label: string; }
 /** Floor blood decal: a kill position that fades over BLOOD_TTL_MS. */
 interface BloodSplat { x: number; y: number; t0: number; }
@@ -43,15 +63,47 @@ const BODY: Record<string, string> = {
   player: '#ff9a4d', npc: '#4dc3ff', mob: '#ff5252', pickup: '#ffe066', projectile: '#ffffff',
 };
 
+/** 0xrrggbb -> `#rrggbb` for the canvas fillStyle of a hit-flash tint. */
+function rgbCss(hex: number): string {
+  const v = Math.max(0, Math.min(0xffffff, Math.floor(hex) & 0xffffff));
+  return '#' + v.toString(16).padStart(6, '0');
+}
+
+/** Screen lift (px) for a world position under the attached terrain field. */
+function lift0(tv: TerrainView | null, x: number, y: number): number {
+  return tv === null ? 0 : zPixels(tv.tileHeightAt(x, y));
+}
+
 /** Polished Canvas2D renderer: primary when WebGL is unavailable. */
 export class CanvasRenderer {
   private ctx: CanvasRenderingContext2D;
   private tiles = new ChunkCache();
   private parts: Particle[] = [];
-  private dmg: DmgNum[] = [];
   private tele: Telegraph[] = [];
   private maxParts = 400;
   private tilePx = TILE_PX_BASE;
+  // ---- combat feedback layer (see feedback.ts) ----
+  /** Pooled damage numbers, capped + time-stepped (never allocates per frame). */
+  private dmg = new DamageNumberPool();
+  /** a11y gate: 'off' drops them, 'short' collapses the motion. */
+  private dmgMode: DmgMode = 'full';
+  /** a11y: motion-free presentation (bursts stop expanding). */
+  private reducedMotion = false;
+  /** 100ms white/red body flashes driven by hit events. */
+  private flashes = new HitFlashRing();
+  /** "took damage recently" markers that gate the world HP bars. */
+  private recent = new RecentDamageRing();
+  /** Reused HP-bar predicate input: the render loop allocates no records. */
+  private barScratch = mobBarScratch();
+  /** Entity id the next swing would resolve against (-1 = none). */
+  private targetId = -1;
+  /** Melee swing lunge + whoosh arc. */
+  private swingState = new SwingState();
+  /** World anchor of the last swing (drawn as the whoosh arc). */
+  private swingX = 0;
+  private swingY = 0;
+  /** Expanding bright rings on a kill (double ring + gold on a finisher). */
+  private killFx = new KillFxRing();
   /** Decaying screen-shake offset in px, see shake(). */
   private shakeAmp = 0;
   private shakeX = 0;
@@ -193,9 +245,134 @@ export class CanvasRenderer {
     if (this.parts.length > this.maxParts) this.parts.splice(0, this.parts.length - this.maxParts);
   }
 
-  damage(x: number, y: number, text: string, color = '#ff6b6b') {
-    this.dmg.push({ x, y: y - 1, text, life: 0.9, max: 0.9, color });
-    if (this.dmg.length > 40) this.dmg.shift();
+  // -------------------------------------------------------------- feedback --
+
+  /**
+   * a11y gate for the floating damage numbers (see damageNumberMode):
+   * 'off' removes them entirely, 'short' keeps the text but kills the rise.
+   * The HUD HP bar, world HP bars, hit flash, shake and audio all carry the
+   * same information, so nothing is lost when they are switched off.
+   */
+  setDamageNumberMode(mode: DmgMode) {
+    this.dmgMode = mode === 'off' ? 'off' : mode === 'short' ? 'short' : 'full';
+    if (this.dmgMode === 'off') this.dmg.clear();
+  }
+
+  /** Current damage-number presentation mode (tests). */
+  damageNumberMode(): DmgMode {
+    return this.dmgMode;
+  }
+
+  /**
+   * a11y: reduced motion. The kill burst stops expanding and stops throwing
+   * particles; it still flashes its rings so the kill is confirmed without
+   * anything travelling across the screen.
+   */
+  setReducedMotion(on: boolean): void {
+    this.reducedMotion = on;
+  }
+
+  /** Current reduced-motion flag (tests). */
+  isReducedMotion(): boolean {
+    return this.reducedMotion;
+  }
+
+  /** Live damage-number count as of the last render (tests + cap pinning). */
+  damageNumberCount(): number {
+    return this.dmg.liveCount;
+  }
+
+  /**
+   * Spawn a floating damage number at a world position. `followId` anchors it
+   * to a live entity instead (used for the player's own damage). Pooled and
+   * capped at DMG_MAX, so a burst of hits never grows the renderer.
+   */
+  damage(
+    x: number,
+    y: number,
+    amount: number,
+    kind: DamageKind = 'normal',
+    nowMs?: number,
+    followId = -1,
+  ): boolean {
+    const t = nowMs ?? performance.now();
+    return this.dmg.spawn(x, y, amount, kind, t, this.dmgMode, followId);
+  }
+
+  /**
+   * Hit flash: the struck body flares for ~100ms. Mob hits flare white, the
+   * player flares red, so "I hit it" and "it hit me" never look alike.
+   */
+  hitFlash(id: number, taken = false, nowMs?: number) {
+    this.flashes.flash(id, taken ? HIT_FLASH_PLAYER : HIT_FLASH_MOB, nowMs ?? performance.now());
+    if (!taken) this.recent.mark(id, nowMs ?? performance.now());
+  }
+
+  /** Mark an entity as "recently damaged" so its world HP bar stays up. */
+  markDamaged(id: number, nowMs?: number) {
+    this.recent.mark(id, nowMs ?? performance.now());
+  }
+
+  /**
+   * Finisher marker: the executing swing removed no HP worth printing, so a
+   * labelled number rides the gold burst instead.
+   */
+  finisher(x: number, y: number, nowMs?: number): boolean {
+    return this.dmg.spawnLabel(x, y, FINISHER_LABEL, 'finisher', nowMs ?? performance.now(), this.dmgMode);
+  }
+
+  /** Entity whose HP bar is forced visible (the predicted melee target). */
+  setTarget(id: number) {
+    this.targetId = Number.isInteger(id) ? id : -1;
+  }
+
+  /** True while the swing lunge / whoosh arc is playing. */
+  isSwinging(nowMs?: number): boolean {
+    return this.swingState.isActive(nowMs ?? performance.now());
+  }
+
+  /**
+   * Play the melee swing: a short forward lunge plus a whoosh arc in front of
+   * the player. Gated to the 800ms server cadence so the animation means "a
+   * swing the server will accept", not "a key was pressed".
+   */
+  swing(px: number, py: number, dirX: number, dirY: number, nowMs?: number): boolean {
+    const t = nowMs ?? performance.now();
+    const started = this.swingState.swing(dirX, dirY, t);
+    if (started) {
+      this.swingX = px;
+      this.swingY = py;
+      // A spark where the blade sweeps, so even a whiff reads as a swing.
+      // a11y: no thrown particles under reduced motion.
+      if (!this.reducedMotion) {
+        this.burst(
+          px + this.swingState.dirX * 0.9,
+          py + this.swingState.dirY * 0.9,
+          '#fff2b0',
+          4,
+        );
+      }
+    }
+    return started;
+  }
+
+  /**
+   * Kill confirmation: a bright expanding ring (double + gold on a finisher)
+   * on top of the blood decal, plus a particle burst sized by the style.
+   */
+  killBurst(x: number, y: number, finisher = false, nowMs?: number): KillBurstStyle {
+    const t = nowMs ?? performance.now();
+    const style = killBurstStyle(finisher);
+    // a11y: under reduced motion the ring flashes in place instead of sweeping
+    // outward, and no particles are thrown.
+    const rings = this.reducedMotion ? { ...style, ringScale: 1, lifeMs: 160 } : style;
+    this.killFx.spawn(x, y, rings, t);
+    if (!this.reducedMotion) this.burst(x, y, style.color, style.particles);
+    if (finisher) {
+      // Second ring reads the finisher apart from a plain kill at a glance.
+      this.killFx.spawn(x, y, { ...rings, ringScale: rings.ringScale * 0.62, lifeMs: rings.lifeMs * 0.7 }, t);
+    }
+    return style;
   }
 
   /**
@@ -374,6 +551,12 @@ export class CanvasRenderer {
     const fogOn = !!fog && typeof fpx === 'number' && typeof fpy === 'number';
     const sorted = [...ents].sort((a, b) => a.y - b.y);
     ctx.textAlign = 'center';
+    // Feedback step: expire flashes/markers, advance damage numbers.
+    this.flashes.step(timeMs);
+    this.recent.step(timeMs);
+    this.dmg.step(timeMs);
+    this.killFx.step(timeMs);
+    const swingEnv = this.swingState.envelope(timeMs);
     // Blood decals: fading floor splats for the last BLOOD_MAX kills, drawn
     // under entities (but over tiles) and culled by the same fog rule.
     if (this.blood.length > 0) {
@@ -405,9 +588,18 @@ export class CanvasRenderer {
         ? e.z
         : tv !== null ? tv.tileHeightAt(e.x, e.y) : 0;
       const lift = zPixels(worldZ);
-      const sx = toSx(e.x), sy = toSy(e.y) - lift;
+      // SWING: the local avatar lunges along the swing direction so the 800ms
+      // cadence is visible; the shadow stays on the tile so the step reads.
+      const lunging = e.isLocal && swingEnv > 0 && !this.reducedMotion;
+      const lx = lunging ? e.x + this.swingState.dirX * SWING_LUNGE * swingEnv : e.x;
+      const ly = lunging ? e.y + this.swingState.dirY * SWING_LUNGE * swingEnv : e.y;
+      const sx = toSx(lx), sy = toSy(ly) - lift;
       if (sx < -40 || sy < -40 || sx > W + 40 || sy > H + 40) continue;
       const color = e.isLocal ? '#59d98c' : this.entityColor(e.kind);
+      // HIT FLASH: 100ms flare on the struck body (white on a mob, red on the
+      // player). Drawn as an extra body pass so the tint never blends mud.
+      const flash = this.flashes.strengthFor(e.id, timeMs);
+      const flashTint = flash > 0 ? rgbCss(this.flashes.tintFor(e.id)) : '';
       // Vocation base disc: class colour under the avatar (palette-driven).
       const disc = e.kind !== 'pickup' && e.kind !== 'projectile' ? this.vocationColor(e.vocation) : '';
       if (disc) {
@@ -433,6 +625,12 @@ export class CanvasRenderer {
         ctx.fillStyle = '#101418';
         ctx.fillRect(sx - 8, sy - 2, 4, 4);
         ctx.fillRect(sx + 4, sy - 2, 4, 4);
+        if (flash > 0) {
+          ctx.globalAlpha = flash;
+          ctx.fillStyle = flashTint;
+          ctx.beginPath(); ctx.roundRect(sx - 12, sy - 6, 24, 12, 5); ctx.fill();
+          ctx.globalAlpha = 1;
+        }
       } else {
         const bob = Math.sin(timeMs / 300 + e.id) * 1.5;
         ctx.fillStyle = color;
@@ -442,14 +640,27 @@ export class CanvasRenderer {
         ctx.fillStyle = '#101418';
         ctx.fillRect(sx - 6, sy - 6 + bob, 4, 5);
         ctx.fillRect(sx + 2, sy - 6 + bob, 4, 5);
+        if (flash > 0) {
+          ctx.globalAlpha = flash;
+          ctx.fillStyle = flashTint;
+          ctx.beginPath(); ctx.roundRect(sx - 10, sy - 14 + bob, 20, 26, 5); ctx.fill();
+          ctx.globalAlpha = 1;
+        }
       }
-      // health bar
+      // Health bar — gated: only a mob that was hit recently or is the current
+      // melee target wears one, so a quiet field is not a wall of green.
       if (e.kind !== 'pickup' && e.kind !== 'projectile') {
-        const frac = e.maxHp > 0 ? Math.max(0, e.hp / e.maxHp) : 0;
-        ctx.fillStyle = '#141a24';
-        ctx.fillRect(sx - 15, sy - 24, 30, 5);
-        ctx.fillStyle = frac > 0.5 ? '#51ff7a' : frac > 0.25 ? '#ffb84d' : '#ff5252';
-        ctx.fillRect(sx - 15, sy - 24, 30 * frac, 5);
+        const showBar = mobBarVisibleInto(
+          this.barScratch, e.hp, e.maxHp, this.recent.lastAt(e.id),
+          e.id === this.targetId, timeMs, e.isLocal,
+        );
+        if (showBar) {
+          const frac = e.maxHp > 0 ? Math.max(0, e.hp / e.maxHp) : 0;
+          ctx.fillStyle = '#141a24';
+          ctx.fillRect(sx - 15, sy - 24, 30, 5);
+          ctx.fillStyle = frac > 0.5 ? '#51ff7a' : frac > 0.25 ? '#ffb84d' : '#ff5252';
+          ctx.fillRect(sx - 15, sy - 24, 30 * frac, 5);
+        }
         // name (+ mask glyph above it when worn)
         ctx.fillStyle = e.isLocal ? '#d6ffe2' : '#fff';
         ctx.font = '11px system-ui';
@@ -495,16 +706,67 @@ export class CanvasRenderer {
     }
     ctx.globalAlpha = 1;
 
-    // Damage numbers (float up).
-    this.dmg = this.dmg.filter((d) => (d.life -= dt) > 0);
-    ctx.font = 'bold 13px system-ui';
-    for (const d of this.dmg) {
-      const f = 1 - d.life / d.max;
-      ctx.globalAlpha = Math.max(0, d.life / d.max);
-      ctx.fillStyle = d.color;
-      ctx.fillText(d.text, toSx(d.x), toSy(d.y) - f * 26);
+    // Kill confirmation rings: bright expanding circles on the corpse. A
+    // finisher draws two, the second one tighter, so the two reads differ by
+    // shape and size as well as hue.
+    for (let i = 0; i < KILL_FX_MAX; i++) {
+      const k = this.killFx.at(i);
+      if (!k.active) continue;
+      if (fogOn && Math.hypot(k.x - fpx!, k.y - fpy!) > FOG_RADIUS && !fog!.isExploredWorld(k.x, k.y)) continue;
+      const p = Math.max(0, Math.min(1, (timeMs - k.t0) / k.lifeMs));
+      const r = Math.max(1, k.r0 * TILE_PX * (0.25 + 1.35 * p));
+      ctx.globalAlpha = Math.max(0, 0.85 * (1 - p));
+      ctx.strokeStyle = k.color;
+      ctx.lineWidth = Math.max(1, 4 * (1 - p));
+      ctx.beginPath(); ctx.ellipse(toSx(k.x), toSy(k.y) - lift0(this.terrain, k.x, k.y), r, r * 0.55, 0, 0, Math.PI * 2); ctx.stroke();
     }
+    ctx.lineWidth = 1;
     ctx.globalAlpha = 1;
+
+    // SWING: a bright whoosh arc in front of the player across the swing's
+    // 120-degree window, so an 800ms-cadence swing is legible at a glance.
+    // a11y: reduced motion keeps the lunge but drops the sweeping arc.
+    if (swingEnv > 0 && !this.reducedMotion) {
+      const wx = toSx(this.swingX + this.swingState.dirX * SWING_LUNGE * swingEnv);
+      const wy = toSy(this.swingY + this.swingState.dirY * SWING_LUNGE * swingEnv) - lift0(tv, this.swingX, this.swingY);
+      const base = Math.atan2(this.swingState.dirY, this.swingState.dirX);
+      const sweep = Math.PI * 0.62;
+      const r = TILE_PX * 0.85;
+      ctx.globalAlpha = Math.min(1, swingEnv * 1.4) * 0.85;
+      ctx.strokeStyle = '#ffe9a8';
+      ctx.lineWidth = Math.max(1, 5 * swingEnv);
+      ctx.beginPath();
+      ctx.arc(wx, wy, r, base - sweep * 0.5, base - sweep * 0.5 + sweep * swingEnv);
+      ctx.stroke();
+      ctx.lineWidth = 1;
+      ctx.globalAlpha = 1;
+    }
+
+    // Damage numbers (pooled, capped, rise + fade). Anchored to the entity
+    // when `followId` is set, so the player's own damage tracks the player.
+    if (this.dmg.liveCount > 0) {
+      ctx.font = 'bold 13px system-ui';
+      for (let i = 0; i < this.dmg.capacity; i++) {
+        const d = this.dmg.at(i);
+        if (!d.active) continue;
+        let dx = d.x, dy = d.y;
+        if (d.followId >= 0) {
+          for (let j = 0; j < sorted.length; j++) {
+            const f = sorted[j]!;
+            if (f.id !== d.followId) continue;
+            dx = f.x; dy = f.y;
+            break;
+          }
+        }
+        const style = DAMAGE_STYLES[d.kind] ?? DAMAGE_STYLES.normal;
+        ctx.globalAlpha = Math.max(0, Math.min(1, d.alpha));
+        ctx.font = `bold ${style.size}px system-ui`;
+        ctx.fillStyle = style.color;
+        ctx.fillText(damageNumberText(d), toSx(dx), toSy(dy) - lift0(tv, dx, dy) - 18 - d.offset);
+      }
+      ctx.font = '11px system-ui';
+      ctx.globalAlpha = 1;
+    }
 
     // Day/night lerp overlay.
     const f = daylightFactor(timeMs / 1000);
