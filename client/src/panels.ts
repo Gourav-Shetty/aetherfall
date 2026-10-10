@@ -18,12 +18,13 @@ import {
   esc,
 } from './social.js';
 
-const PANEL_CSS = `
-/* ---------- systems panels (additive) ---------- */
-.af-panel{position:absolute;top:10px;right:10px;width:250px;z-index:7;background:rgba(16,21,31,.92);
-  border:1px solid #3a4557;border-radius:8px;padding:8px 10px;font-size:12px;display:none}
+export const PANEL_CSS = `
+/* ---------- systems panels (additive, dark-fantasy glass) ---------- */
+.af-panel{position:absolute;top:10px;right:10px;width:250px;z-index:7;background:rgba(13,19,38,.78);
+  backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+  border:1px solid rgba(232,198,106,.35);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.45);padding:8px 10px;font-size:12px;display:none}
 .af-panel.open{display:block}
-.af-panel h3{margin:0 0 6px;font-size:11px;letter-spacing:2px;color:#8fa3bf;display:flex;justify-content:space-between;align-items:center}
+.af-panel h3{margin:0 0 6px;font-size:11px;letter-spacing:2px;text-transform:uppercase;font-variant:small-caps;color:#e8c66a;display:flex;justify-content:space-between;align-items:center}
 .af-panel h3 .af-x{cursor:pointer;color:#8fa3bf;padding:0 4px}
 .af-panel h3 .af-x:hover{color:#fff}
 #af-talents{width:340px;top:auto}
@@ -36,7 +37,7 @@ const PANEL_CSS = `
 .af-hpbar{position:relative;height:6px;background:#20262f;border:1px solid #10141b;border-radius:3px;overflow:hidden;margin-top:3px}
 .af-hpbar>i{display:block;height:100%}
 .af-foot{margin-top:6px;color:#8fa3bf;font-size:10px;display:flex;justify-content:space-between}
-.af-invite{margin-top:6px;padding:4px 6px;border:1px solid #59d98c;border-radius:4px;color:#7dff9b;font-size:11px}
+.af-invite{margin-top:6px;padding:4px 6px;border:1px solid rgba(232,198,106,.5);border-radius:8px;color:#e8c66a;font-size:11px;background:rgba(232,198,106,.08)}
 /* vendor */
 .af-shop-row{display:grid;grid-template-columns:1fr auto auto;gap:6px;align-items:center;padding:3px 0;border-bottom:1px solid rgba(58,69,87,.5)}
 .af-shop-row:last-child{border-bottom:none}
@@ -49,10 +50,10 @@ const PANEL_CSS = `
 .af-branch{margin-top:6px}
 .af-branch>div:first-child{font-size:10px;letter-spacing:2px;color:#cfe3ff;margin-bottom:3px}
 .af-node{display:grid;grid-template-columns:1fr auto;gap:6px;align-items:center;padding:3px 5px;margin-top:3px;
-  background:rgba(20,26,36,.7);border:1px solid #3a4557;border-radius:4px;cursor:pointer}
-.af-node:hover{border-color:#59d98c}
+  background:rgba(13,19,38,.7);border:1px solid rgba(232,198,106,.25);border-radius:8px;cursor:pointer;min-height:40px}
+.af-node:hover{border-color:#e8c66a}
 .af-node.locked{opacity:.45;cursor:not-allowed}
-.af-node.maxed{border-color:#ffe066}
+.af-node.maxed{border-color:#e8c66a;box-shadow:0 0 8px rgba(232,198,106,.3)}
 .af-node .af-rank{color:#ffe066;font-size:11px;white-space:nowrap}
 .af-node .af-desc{color:#8fa3bf;font-size:10px}
 /* emote bubbles (world-space overlay, not in the panel stack) */
@@ -60,6 +61,7 @@ const PANEL_CSS = `
   text-shadow:0 1px 3px #000;animation:afBubbleIn .18s ease-out}
 .af-bubble .af-tag{display:block;font-size:9px;color:#cfe3ff;text-align:center;margin-top:1px}
 @keyframes afBubbleIn{from{transform:translate(-50%,-80%) scale(.7);opacity:0}}
+html[data-a11y-motion="reduced"] .af-bubble{animation:none!important;transition:none!important}
 `;
 
 let cssInjected = false;

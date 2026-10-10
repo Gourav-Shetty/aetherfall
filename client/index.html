@@ -10,16 +10,22 @@
   --bg:#0b0e14; --panel:#141a24; --panel2:#1a2230; --line:#2a3547;
   --txt:#e8eef7; --dim:#8fa3bf; --acc:#59d98c; --acc2:#4dc3ff; --warn:#ffb84d; --bad:#ff5252;
   --hero1:#1b2a4a; --hero2:#0e3b2e;
+  /* ---- AETHERFALL dark-fantasy polish (offline-safe, no webfonts) ---- */
+  --af-gold:#e8c66a; --af-gold-hi:#f5d98a; --af-gold-dim:rgba(232,198,106,.35);
+  --af-panel:#0d1326; --af-glass:rgba(13,19,38,.78); --af-border:rgba(232,198,106,.35);
+  --af-shadow:0 8px 24px rgba(0,0,0,.45);
+  --af-hp1:#ff7a6b; --af-hp2:#b81e2c; --af-xp1:#c39bff; --af-xp2:#6d28d9;
+  --af-font:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
 }
 *{box-sizing:border-box}
-html,body{margin:0;min-height:100%;background:var(--bg);color:var(--txt);font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+html,body{margin:0;min-height:100%;background:var(--bg);color:var(--txt);font-family:var(--af-font)}
 a{color:var(--acc2)}
 #app{display:flex;flex-direction:column;height:100vh}
 /* ---------- top bar ---------- */
-#topbar{padding:8px 12px;background:#11161f;border-bottom:1px solid #232c3d;display:flex;gap:12px;align-items:center;z-index:30}
-#topbar b{letter-spacing:3px;background:linear-gradient(90deg,#9ecbff,#59d98c,#ffe066);-webkit-background-clip:text;background-clip:text;color:transparent}
+#topbar{padding:8px 12px;background:#11161f;border-bottom:1px solid var(--af-border);display:flex;gap:12px;align-items:center;z-index:30}
+#topbar b{letter-spacing:3px;background:linear-gradient(90deg,var(--af-gold-hi),#9ecbff 45%,#59d98c 80%,var(--af-gold));-webkit-background-clip:text;background-clip:text;color:transparent}
 #status{color:var(--dim);font-size:12px;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.tbtn{background:var(--panel2);color:var(--txt);border:1px solid var(--line);border-radius:6px;padding:5px 10px;cursor:pointer;font-size:13px}
+.tbtn{background:var(--panel2);color:var(--txt);border:1px solid var(--line);border-radius:6px;padding:5px 10px;cursor:pointer;font-size:13px;min-width:40px;min-height:40px}
 .tbtn:hover{border-color:var(--acc2)}
 .tbtn.on{border-color:var(--acc);color:var(--acc)}
 /* ---------- game view ---------- */
@@ -30,29 +36,47 @@ a{color:var(--acc2)}
 .float{position:absolute;transform:translate(-50%,-50%);font-weight:700;font-size:14px;text-shadow:0 1px 2px #000;animation:floatUp .9s ease-out forwards;pointer-events:none}
 @keyframes floatUp{to{transform:translate(-50%,-180%);opacity:0}}
 #hud{position:absolute;inset:0;pointer-events:none;font-size:12px;z-index:5}
-.hud-tl{position:absolute;top:10px;left:10px;width:230px}
-.bar{position:relative;height:18px;background:#20262f;border:1px solid #3a4557;border-radius:4px;margin-bottom:6px;overflow:hidden}
+/* vitals bottom-center + quest top-left + map top-right (same DOM ids, CSS layout only) */
+.hud-tl{position:absolute;top:10px;left:10px;width:250px;z-index:6}
+.hud-bc{position:absolute;left:50%;bottom:12px;transform:translateX(-50%);width:min(440px,72vw);display:flex;flex-direction:column;gap:6px;z-index:6;pointer-events:none}
+.hud-vitals{background:var(--af-glass);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border:1px solid var(--af-border);border-radius:8px;box-shadow:var(--af-shadow);padding:8px 10px;pointer-events:none}
+.vitals-row{display:flex;gap:10px;align-items:center}
+.vitals-bars{flex:1;display:flex;flex-direction:column;gap:5px;min-width:0}
+.level-badge{flex:none;width:44px;height:44px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+  font-weight:800;font-size:16px;color:#1a1200;background:radial-gradient(circle at 30% 30%,var(--af-gold-hi),var(--af-gold) 60%,#9a7a2e);
+  border:1px solid var(--af-gold-hi);box-shadow:0 0 12px rgba(232,198,106,.45);text-shadow:none}
+.bar{position:relative;height:18px;background:#20262f;border:1px solid var(--af-border);border-radius:8px;margin-bottom:0;overflow:hidden;box-shadow:inset 0 1px 3px rgba(0,0,0,.6)}
 .bar>i{display:block;height:100%;width:100%;transition:width .2s}
-.bar.hp>i{background:linear-gradient(#7dff9b,#2ca85c)}
-.bar.xp>i{background:linear-gradient(#9ecbff,#3b6fd4)}
-.bar>span{position:absolute;inset:0;text-align:center;line-height:16px;color:#fff;text-shadow:0 1px 2px #000}
+.bar.hp{height:20px}
+.bar.hp>i{background:linear-gradient(180deg,var(--af-hp1),var(--af-hp2))}
+.bar.xp{height:8px}
+.bar.xp>i{background:linear-gradient(90deg,var(--af-xp1),var(--af-xp2))}
+.bar>span{position:absolute;inset:0;text-align:center;line-height:16px;color:#fff;text-shadow:0 1px 2px #000;font-size:11px}
+.bar.xp>span{display:none}
 #hud-inv{display:grid;grid-template-columns:repeat(5,1fr);gap:4px;margin-top:6px}
-.slot{min-height:34px;background:rgba(20,26,36,.85);border:1px solid #3a4557;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:11px;pointer-events:auto;overflow:hidden;text-overflow:ellipsis}
-.hud-tr{position:absolute;top:10px;right:10px;width:260px;display:flex;flex-direction:column;gap:4px;align-items:flex-end}
-.feed-item{background:rgba(20,26,36,.85);border:1px solid #3a4557;padding:4px 8px;border-radius:4px}
+.slot{min-height:40px;background:var(--af-glass);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border:1px solid var(--af-border);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:11px;pointer-events:auto;overflow:hidden;text-overflow:ellipsis;box-shadow:var(--af-shadow)}
+.hud-tr{position:absolute;top:10px;right:10px;width:160px;display:flex;flex-direction:column;gap:6px;align-items:flex-end;z-index:6}
+#hud-feed{display:flex;flex-direction:column;gap:4px;align-items:flex-end;max-width:260px}
+.feed-item{background:var(--af-glass);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border:1px solid var(--af-border);border-radius:8px;box-shadow:var(--af-shadow);padding:5px 10px;animation:feedIn .25s ease-out}
+@keyframes feedIn{from{transform:translateX(16px);opacity:0}}
 .hud-qr{position:absolute;right:10px;bottom:10px;display:flex;flex-direction:column;gap:6px;align-items:flex-end}
-#hud-quests{background:rgba(20,26,36,.85);border:1px solid #3a4557;border-radius:4px;padding:6px 8px;max-width:240px}
+#hud-quests{background:var(--af-glass);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border:1px solid var(--af-border);border-radius:8px;box-shadow:var(--af-shadow);padding:8px 10px;max-width:250px}
+#hud-quests>b{display:block;font-size:11px;letter-spacing:2px;text-transform:uppercase;font-variant:small-caps;color:var(--af-gold);margin-bottom:2px}
 .quest{margin-top:4px}
 .quest>span{color:#8fa3bf}
 .quest.done{color:#7dff9b;text-decoration:line-through}
-#hud-map{border:1px solid #3a4557;border-radius:4px;background:#0d1f16}
-.hud-bl{position:absolute;left:10px;bottom:10px;width:340px;pointer-events:auto;max-width:calc(100vw - 220px)}
-#hud-chat{height:130px;overflow-y:auto;background:rgba(10,14,20,.8);border:1px solid #3a4557;border-radius:4px;padding:6px;margin-bottom:6px}
-.chat-line{margin:1px 0;word-wrap:break-word}
-.chan{color:#8fa3bf}
+#hud-map{border:1px solid var(--af-border);border-radius:8px;background:#0d1f16;box-shadow:var(--af-shadow)}
+.hud-bl{position:absolute;left:10px;bottom:10px;width:360px;pointer-events:auto;max-width:calc(100vw - 220px)}
+#hud-chat{height:130px;overflow-y:auto;background:var(--af-glass);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border:1px solid var(--af-border);border-radius:8px;box-shadow:var(--af-shadow);padding:6px;margin-bottom:6px}
+.chat-line{margin:1px 0;word-wrap:break-word;animation:chatIn .2s ease-out}
+@keyframes chatIn{from{transform:translateY(4px);opacity:0}}
+#hud-chat .chat-line:nth-last-child(n+9){opacity:.55}
+#hud-chat .chat-line:nth-last-child(n+16){opacity:.35}
+.chan{color:#8fa3bf;font-weight:700}
+.chan-global{color:#4dc3ff} .chan-say{color:#59d98c} .chan-guild{color:var(--af-gold)} .chan-party{color:#c39bff}
 .chat-row{display:flex;gap:6px}
-#hud-input{flex:1;background:#141a24;color:#e8eef7;border:1px solid #3a4557;border-radius:4px;padding:6px;min-width:0}
-#hud-chan{background:#141a24;color:#e8eef7;border:1px solid #3a4557;border-radius:4px}
+#hud-input{flex:1;background:#141a24;color:#e8eef7;border:1px solid var(--af-border);border-radius:8px;padding:6px 10px;min-width:0;min-height:40px}
+#hud-chan{background:#141a24;color:#e8eef7;border:1px solid var(--af-border);border-radius:8px;min-height:40px}
 /* ---------- damage vignette ---------- */
 #vignette{position:absolute;inset:0;pointer-events:none;z-index:6;opacity:0;transition:opacity .45s ease-out;
   background:radial-gradient(ellipse at center,transparent 52%,rgba(255,30,30,.55) 100%)}
@@ -60,24 +84,26 @@ a{color:var(--acc2)}
 #fps{position:absolute;left:10px;top:10px;z-index:7;pointer-events:none;font-size:11px;color:#cfe3ff;
   background:rgba(10,14,20,.7);border:1px solid var(--line);border-radius:4px;padding:3px 8px;display:none}
 /* ---------- leaderboard ---------- */
-#leaderboard{position:absolute;right:10px;top:64px;width:230px;z-index:7;background:rgba(16,21,31,.92);
-  border:1px solid var(--line);border-radius:8px;padding:10px 12px;font-size:12px;display:none}
-#leaderboard h3{margin:0 0 8px;font-size:12px;letter-spacing:2px;color:var(--warn)}
+#leaderboard{position:absolute;right:10px;top:64px;width:230px;z-index:7;background:var(--af-glass);
+  backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+  border:1px solid var(--af-border);border-radius:8px;box-shadow:var(--af-shadow);padding:10px 12px;font-size:12px;display:none}
+#leaderboard h3{margin:0 0 8px;font-size:12px;letter-spacing:2px;text-transform:uppercase;font-variant:small-caps;color:var(--af-gold)}
 #lb-list{display:flex;flex-direction:column;gap:5px}
 #lb-list .me{color:var(--acc)}
 #lb-list .rank{color:var(--dim);margin-right:4px}
 #lb-list .lb-meta{float:right;color:var(--dim)}
 #lb-list .lb-empty{color:var(--dim)}
 /* ---------- settings ---------- */
-#settings{position:absolute;right:10px;top:64px;width:280px;z-index:9;background:rgba(16,21,31,.96);
-  border:1px solid var(--line);border-radius:8px;padding:12px;font-size:13px;display:none}
-#settings h3{margin:0 0 10px;font-size:13px;letter-spacing:2px}
+#settings{position:absolute;right:10px;top:64px;width:280px;z-index:9;background:var(--af-glass);
+  backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+  border:1px solid var(--af-border);border-radius:8px;box-shadow:var(--af-shadow);padding:12px;font-size:13px;display:none}
+#settings h3{margin:0 0 10px;font-size:13px;letter-spacing:2px;text-transform:uppercase;font-variant:small-caps;color:var(--af-gold)}
 #settings label{display:block;margin:8px 0;color:var(--dim)}
 #settings select,#settings input[type=text]{width:100%;background:#0b0e14;color:var(--txt);border:1px solid var(--line);border-radius:4px;padding:6px}
 #settings input[type=range]{width:100%}
 #settings .row{display:flex;gap:8px;align-items:center;justify-content:space-between}
 #settings .row button{flex:1}
-.sbtn{background:var(--panel2);color:var(--txt);border:1px solid var(--line);border-radius:6px;padding:6px 8px;cursor:pointer}
+.sbtn{background:var(--panel2);color:var(--txt);border:1px solid var(--line);border-radius:6px;padding:6px 8px;cursor:pointer;min-height:40px}
 .sbtn.sel{border-color:var(--acc);color:var(--acc)}
 /* ---------- loading / death ---------- */
 #loading{position:absolute;inset:0;display:none;align-items:center;justify-content:center;background:rgba(5,8,12,.78);z-index:8}
@@ -91,11 +117,11 @@ a{color:var(--acc2)}
 #death .card{background:#1d0f12;border:1px solid #7a2b2b;border-radius:12px;padding:28px 34px;text-align:center;max-width:340px}
 #death h2{margin:0 0 6px;color:#ff8080;letter-spacing:3px}
 #death p{color:#d9a5a5;font-size:13px}
-#respawn-btn{background:var(--acc);color:#06130c;border:none;border-radius:6px;padding:10px 22px;font-weight:700;cursor:pointer;font-size:14px}
+#respawn-btn{background:linear-gradient(90deg,var(--af-gold),var(--af-gold-hi));color:#1a1200;border:none;border-radius:8px;padding:10px 22px;font-weight:700;cursor:pointer;font-size:14px;min-height:40px}
 #respawn-btn:hover{filter:brightness(1.1)}
 /* ---------- toast ---------- */
-#toast{position:absolute;left:50%;bottom:86px;transform:translateX(-50%);z-index:10;display:flex;flex-direction:column;gap:6px;align-items:center;pointer-events:none}
-.toast-msg{background:rgba(16,21,31,.94);border:1px solid var(--line);border-radius:6px;padding:7px 14px;font-size:12px;animation:tin .25s ease-out}
+#toast{position:absolute;left:50%;bottom:110px;transform:translateX(-50%);z-index:10;display:flex;flex-direction:column;gap:6px;align-items:center;pointer-events:none}
+.toast-msg{background:var(--af-glass);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border:1px solid var(--af-border);border-radius:8px;box-shadow:var(--af-shadow);padding:7px 14px;font-size:12px;animation:tin .25s ease-out}
 @keyframes tin{from{transform:translateY(8px);opacity:0}}
 /* ---------- touch controls ---------- */
 #touch{position:absolute;inset:auto 0 0 0;z-index:7;pointer-events:none;display:none}
@@ -121,44 +147,47 @@ a{color:var(--acc2)}
 @media(max-width:860px){.hero{grid-template-columns:1fr}}
 .kicker{display:inline-block;font-size:11px;letter-spacing:3px;color:var(--acc2);border:1px solid var(--line);border-radius:20px;padding:4px 12px;background:rgba(77,195,255,.08)}
 .hero h1{font-size:clamp(38px,6vw,64px);margin:14px 0 8px;letter-spacing:4px;
-  background:linear-gradient(90deg,#fff,#9ecbff 40%,#59d98c 75%,#ffe066);-webkit-background-clip:text;background-clip:text;color:transparent}
+  background:linear-gradient(90deg,#fff,var(--af-gold-hi) 35%,#9ecbff 60%,var(--af-gold));-webkit-background-clip:text;background-clip:text;color:transparent}
 .tag{color:var(--dim);font-size:15px;line-height:1.6;max-width:52ch}
-.tag b{color:var(--txt)}
+.tag b{color:var(--af-gold-hi)}
 .pills{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0}
-.pill{font-size:11px;color:#cfe3ff;background:rgba(20,26,36,.8);border:1px solid var(--line);border-radius:20px;padding:4px 10px}
-.join-card{background:linear-gradient(180deg,#161d2a,#10151f);border:1px solid var(--line);border-radius:14px;padding:20px}
-.join-card h2{margin:0 0 4px;font-size:16px;letter-spacing:2px}
+.pill{font-size:11px;color:#cfe3ff;background:var(--af-glass);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border:1px solid var(--af-border);border-radius:20px;padding:4px 10px}
+.join-card{background:linear-gradient(180deg,var(--af-panel),#10151f);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border:1px solid var(--af-border);border-radius:8px;box-shadow:var(--af-shadow);padding:20px}
+.join-card h2{margin:0 0 4px;font-size:16px;letter-spacing:2px;text-transform:uppercase;font-variant:small-caps;color:var(--af-gold)}
 .join-card p{margin:0 0 12px;color:var(--dim);font-size:12px}
 .join-card label{display:block;font-size:11px;color:var(--dim);margin:10px 0 4px;letter-spacing:1px}
-.join-card input{width:100%;background:#0b0e14;color:var(--txt);border:1px solid var(--line);border-radius:6px;padding:10px;font-size:14px}
-#join{width:100%;margin-top:14px;background:linear-gradient(90deg,#2ca85c,#59d98c);color:#06130c;border:none;border-radius:8px;padding:12px;font-size:16px;font-weight:800;letter-spacing:2px;cursor:pointer}
+.join-card input{width:100%;background:#0b0e14;color:var(--txt);border:1px solid var(--af-border);border-radius:8px;padding:10px;font-size:14px;min-height:40px}
+#join{width:100%;margin-top:14px;background:linear-gradient(90deg,var(--af-gold),var(--af-gold-hi));color:#1a1200;border:none;border-radius:8px;padding:14px;font-size:17px;font-weight:800;letter-spacing:2px;cursor:pointer;min-height:48px;box-shadow:0 4px 18px rgba(232,198,106,.35)}
 #join:hover{filter:brightness(1.08)}
 .hintline{margin-top:8px;font-size:11px;color:var(--dim);text-align:center}
 .sec{margin-top:34px}
-.sec h2{font-size:13px;letter-spacing:3px;color:var(--dim);margin:0 0 12px}
+.sec h2{font-size:13px;letter-spacing:3px;text-transform:uppercase;font-variant:small-caps;color:var(--af-gold);margin:0 0 12px;border-bottom:1px solid var(--af-gold-dim);padding-bottom:6px}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 @media(max-width:700px){.grid2{grid-template-columns:1fr}}
 .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
 @media(max-width:860px){.grid3{grid-template-columns:1fr}}
-.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px}
-.card h3{margin:0 0 6px;font-size:14px}
+.card{background:var(--af-glass);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border:1px solid var(--af-border);border-radius:8px;box-shadow:var(--af-shadow);padding:14px}
+.card h3{margin:0 0 6px;font-size:14px;letter-spacing:1px;text-transform:uppercase;font-variant:small-caps;color:var(--af-gold-hi)}
+.feat-icon{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;margin-right:8px;border-radius:8px;
+  border:1px solid var(--af-border);background:rgba(232,198,106,.12);color:var(--af-gold);font-size:15px;vertical-align:-6px}
 .card p, .card li{color:var(--dim);font-size:12.5px;line-height:1.55}
 .card ul{margin:6px 0 0;padding-left:18px}
 kbd{background:#0b0e14;border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;padding:1px 6px;font-size:11px;font-family:inherit}
 .shots{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
 @media(max-width:700px){.shots{grid-template-columns:1fr}}
-.shot{aspect-ratio:16/10;border-radius:10px;border:1px solid var(--line);display:flex;align-items:center;justify-content:center;
-  font-size:12px;color:var(--dim);letter-spacing:1px}
+.shot{aspect-ratio:16/10;border-radius:8px;border:1px solid var(--af-border);box-shadow:var(--af-shadow);display:flex;align-items:center;justify-content:center;
+  font-size:12px;color:var(--dim);letter-spacing:1px;overflow:hidden}
 .shot.s1{background:linear-gradient(135deg,#1b2a4a,#123f31)}
 .shot.s2{background:linear-gradient(135deg,#3a2a4a,#1b3a4a)}
 .shot.s3{background:linear-gradient(135deg,#4a3a1b,#1b4a3a)}
-.shot img{width:100%;height:100%;object-fit:cover;border-radius:10px;display:block}
+.shot img{width:100%;height:100%;object-fit:cover;border-radius:8px;display:block;transition:transform .3s ease}
+.shot:hover img,.shot:focus-within img{transform:scale(1.04)}
 .shot figure{margin:0;width:100%}
 .shot figcaption{font-size:11px;color:var(--dim);padding:6px 2px 0;letter-spacing:0}
 /* ---------- under the hood ---------- */
 .hood{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}
 @media(max-width:860px){.hood{grid-template-columns:repeat(2,1fr)}}
-.stat{background:linear-gradient(180deg,#161d2a,#10151f);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+.stat{background:linear-gradient(180deg,var(--af-panel),#10151f);border:1px solid var(--af-border);border-radius:8px;box-shadow:var(--af-shadow);padding:12px 14px}
 .stat b{display:block;font-size:23px;letter-spacing:.5px;color:var(--acc);line-height:1.15;font-variant-numeric:tabular-nums}
 .stat b.w{color:var(--acc2)} .stat b.g{color:#ffe066}
 .stat span{display:block;font-size:10.5px;color:var(--dim);margin-top:5px;line-height:1.45;letter-spacing:.2px}
@@ -177,10 +206,13 @@ table.proto tr.win td.num{color:var(--acc)}
 .kv dd{margin:0;color:#cfe3ff}
 table.controls{width:100%;border-collapse:collapse;font-size:12.5px}
 table.controls th,table.controls td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line)}
-table.controls th{color:var(--dim);font-size:11px;letter-spacing:2px;font-weight:600}
+table.controls th{color:var(--dim);font-size:11px;letter-spacing:2px;font-weight:600;text-transform:uppercase;font-variant:small-caps}
+table.controls tbody tr:nth-child(even){background:rgba(232,198,106,.06)}
+table.controls tbody tr:nth-child(odd){background:transparent}
 .dl code{background:#0b0e14;border:1px solid var(--line);border-radius:4px;padding:1px 6px;font-size:11.5px}
 .dl pre{background:#0b0e14;border:1px solid var(--line);border-radius:8px;padding:12px;font-size:12px;overflow-x:auto;color:#cfe3ff}
-.foot{margin-top:30px;color:var(--dim);font-size:12px;display:flex;gap:14px;flex-wrap:wrap;justify-content:space-between}
+.foot{margin-top:30px;color:var(--dim);font-size:12px;display:flex;gap:14px;flex-wrap:wrap;justify-content:space-between;align-items:center}
+.ver-badge,.proto-badge{display:inline-block;font-size:11px;letter-spacing:1px;border:1px solid var(--af-border);border-radius:20px;padding:3px 10px;background:rgba(232,198,106,.08);color:var(--af-gold);margin-left:8px;white-space:nowrap}
 /* ===================== ACCESSIBILITY (a11y.ts) =====================
    Driven by data-* attributes set on <html> by A11y.apply(); the module owns
    the logic, this block only styles it. Kept declarative so every theme works
@@ -202,7 +234,9 @@ html{font-size:calc(16px * var(--af-scale,1))}
 
 /* -- high contrast theme -- */
 html[data-a11y-contrast="high"]{--bg:#000;--panel:#000;--panel2:#0a0a0a;--line:#fff;
-  --txt:#fff;--dim:#e0e0e0;--acc:#5fffa0;--acc2:#7fdcff;--warn:#ffd700;--bad:#ff6b6b}
+  --txt:#fff;--dim:#e0e0e0;--acc:#5fffa0;--acc2:#7fdcff;--warn:#ffd700;--bad:#ff6b6b;
+  --af-gold:#ffd700;--af-gold-hi:#ffe97a;--af-gold-dim:#fff;--af-panel:#000;--af-glass:#000;--af-border:#fff;
+  --af-hp1:#ff6b6b;--af-hp2:#ff0000;--af-xp1:#d3a6ff;--af-xp2:#9a6bff}
 html[data-a11y-contrast="high"] #hud .bar,
 html[data-a11y-contrast="high"] .slot,
 html[data-a11y-contrast="high"] #hud-chat,
@@ -210,22 +244,36 @@ html[data-a11y-contrast="high"] #hud-quests,
 html[data-a11y-contrast="high"] .feed-item,
 html[data-a11y-contrast="high"] #settings,
 html[data-a11y-contrast="high"] #leaderboard,
-html[data-a11y-contrast="high"] .a11y-panel{background:#000;border-color:#fff}
+html[data-a11y-contrast="high"] .a11y-panel,
+html[data-a11y-contrast="high"] .card,
+html[data-a11y-contrast="high"] .join-card,
+html[data-a11y-contrast="high"] .hud-vitals,
+html[data-a11y-contrast="high"] #hud-map,
+html[data-a11y-contrast="high"] .toast-msg{background:#000;border-color:#fff}
 html[data-a11y-contrast="high"] .bar>i{filter:contrast(1.4) saturate(1.2)}
 html[data-a11y-contrast="high"] *:focus-visible{outline-color:#5fffa0;outline-width:4px}
+/* -- colourblind palettes ride on JS-driven --af-entity-* vars (a11y.ts); bars keep
+   luminance contrast so deuteranopia/protanopia/tritanopia presets stay legible -- */
+html[data-a11y-palette="deuteranopia"] .bar.hp>i{background:linear-gradient(180deg,#ffb000,#b86a00)}
+html[data-a11y-palette="protanopia"] .bar.hp>i{background:linear-gradient(180deg,#ffa000,#7a4a00)}
+html[data-a11y-palette="tritanopia"] .bar.hp>i{background:linear-gradient(180deg,#ff8a5e,#b83a00)}
 
 /* -- reduced motion: no shake, no particles, no transitions -- */
 html[data-a11y-motion="reduced"] *{animation:none!important;transition:none!important}
 html[data-a11y-motion="reduced"] .spinner{display:none}
 html[data-a11y-motion="reduced"] #vignette{display:none}
 html[data-a11y-motion="reduced"] .float{animation:none}
+html[data-a11y-motion="reduced"] .feed-item,
+html[data-a11y-motion="reduced"] .chat-line,
+html[data-a11y-motion="reduced"] .toast-msg,
+html[data-a11y-motion="reduced"] .shot img{animation:none!important;transition:none!important;transform:none!important}
 
 /* -- a11y panel -- */
 .a11y-panel{position:absolute;right:10px;top:64px;width:320px;max-height:calc(100vh - 140px);
-  overflow-y:auto;z-index:10;background:rgba(10,14,20,.97);border:1px solid var(--line);
-  border-radius:8px;padding:12px;display:none;font-size:12px}
+  overflow-y:auto;z-index:10;background:var(--af-glass);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border:1px solid var(--af-border);
+  border-radius:8px;box-shadow:var(--af-shadow);padding:12px;display:none;font-size:12px}
 .a11y-panel.show{display:block}
-.a11y-panel h3{margin:0 0 10px;font-size:12px;letter-spacing:2px;color:var(--acc2)}
+.a11y-panel h3{margin:0 0 10px;font-size:12px;letter-spacing:2px;text-transform:uppercase;font-variant:small-caps;color:var(--af-gold)}
 .a11y-panel .grp{margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid var(--line)}
 .a11y-panel .grp:last-child{border-bottom:none}
 .a11y-panel label.lab{display:block;margin:0 0 5px;color:var(--txt);font-weight:600}
@@ -379,23 +427,23 @@ html[data-a11y-motion="reduced"] .float{animation:none}
             binary protocol, and a from-scratch ECS. No engine. No networking library.
             Just sockets, math, and pixels. Enter a name and step through the gate.</p>
           <div class="pills">
-            <span class="pill">⚡ tick 7.4 ms @100</span>
-            <span class="pill">🔮 prediction + interp</span>
-            <span class="pill">📉 −93% bytes (v2)</span>
-            <span class="pill">🧊 isometric + fog of war</span>
-            <span class="pill">🤖 300-bot soak</span>
-            <span class="pill">✅ 697 tests</span>
+            <span class="pill">◆ tick 7.4 ms @100</span>
+            <span class="pill">◈ prediction + interp</span>
+            <span class="pill">↓ −93% bytes (v2)</span>
+            <span class="pill">❄ isometric + fog of war</span>
+            <span class="pill">✦ 300-bot soak</span>
+            <span class="pill">✓ 697 tests</span>
           </div>
           <div class="grid2">
-            <div class="card"><h3>🎮 Controls</h3>
+            <div class="card"><h3><span class="feat-icon" aria-hidden="true">⌨</span>Controls</h3>
               <ul>
                 <li><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> / arrows — move</li>
-                <li><kbd>Space</kbd> / left-click / ⚔ — attack</li>
+                <li><kbd>Space</kbd> / left-click / <span aria-hidden="true">⚔</span> — attack</li>
                 <li><kbd>Enter</kbd> — chat · <kbd>L</kbd> leaderboard · <kbd>M</kbd> mute</li>
-                <li>📱 mobile joystick + attack button</li>
+                <li>◉ mobile joystick + attack button</li>
               </ul>
             </div>
-            <div class="card"><h3>🌐 Connection</h3>
+            <div class="card"><h3><span class="feat-icon" aria-hidden="true">◈</span>Connection</h3>
               <p style="margin:0">Server defaults to <kbd>ws://localhost:8081</kbd>.
               Override with <kbd>?server=ws://host:port</kbd>, quick-join with
               <kbd>?name=hero&amp;autojoin=1</kbd>, editor with <kbd>?editormode=1</kbd>.</p>
@@ -403,7 +451,7 @@ html[data-a11y-motion="reduced"] .float{animation:none}
           </div>
         </div>
         <div class="join-card">
-          <h2>⛩ ENTER THE FALL</h2>
+          <h2><span class="feat-icon" aria-hidden="true">◆</span>ENTER THE FALL</h2>
           <p>Pick a soul-name. The shrine at (50, 50) awaits.</p>
           <label for="name">SOUL NAME</label>
           <input id="name" value="hero" maxlength="16" autocomplete="off"/>
@@ -413,17 +461,17 @@ html[data-a11y-motion="reduced"] .float{animation:none}
           <div class="hintline">Enter also joins · progress saves to the shrine (server DB)</div>
         </div>
       </div>
-      <div class="sec"><h2>✨ FEATURES</h2>
+      <div class="sec"><h2>✦ FEATURES</h2>
         <div class="grid3">
-          <div class="card"><h3>⚡ Authoritative netcode</h3><p>20 Hz input, 10 Hz interest-filtered snapshots, ack-tracked reconcile + interpolation. Anti-cheat covers rate, burst, speed and teleport — every check exported to <code>/metrics</code>.</p></div>
-          <div class="card"><h3>📉 Bandwidth as a feature</h3><p>40 m interest cull with <code>removed[]</code> eviction, a cell-bucket index (<code>O(N×E)</code> → <code>O(N+E)</code>), serialize-once snapshots, and a negotiated binary protocol v2 at <b>−93% bytes</b>.</p></div>
-          <div class="card"><h3>🧩 Custom ECS engine</h3><p>Sparse-set ECS with a priority system scheduler, dynamic spatial hash, A* with corner-cut prevention, and deterministic biomes/zones/dungeons server and client both agree on.</p></div>
-          <div class="card"><h3>🗺 Fog, bosses, day/night</h3><p>Three-tier fog of war persisted per 8 m chunk, four bosses with server-sent telegraphs, a 120 s day/night cycle, minimap, kill feed and a 5-quest chain.</p></div>
-          <div class="card"><h3>🧊 Two renderers</h3><p>Three.js isometric 2.5D (instanced terrain, 2 draw calls) with a Canvas2D fallback that engages automatically on no WebGL or low FPS.</p></div>
-          <div class="card"><h3>🤖 Prove it</h3><p>Sharded bot swarm with deterministic profiles, chaos + anti-cheat probes, per-player CSV reports, replay recorder/scrubber and an offline benchmark dashboard.</p></div>
+          <div class="card"><h3><span class="feat-icon" aria-hidden="true">◆</span>Authoritative netcode</h3><p>20 Hz input, 10 Hz interest-filtered snapshots, ack-tracked reconcile + interpolation. Anti-cheat covers rate, burst, speed and teleport — every check exported to <code>/metrics</code>.</p></div>
+          <div class="card"><h3><span class="feat-icon" aria-hidden="true">◈</span>Bandwidth as a feature</h3><p>40 m interest cull with <code>removed[]</code> eviction, a cell-bucket index (<code>O(N×E)</code> → <code>O(N+E)</code>), serialize-once snapshots, and a negotiated binary protocol v2 at <b>−93% bytes</b>.</p></div>
+          <div class="card"><h3><span class="feat-icon" aria-hidden="true">⬡</span>Custom ECS engine</h3><p>Sparse-set ECS with a priority system scheduler, dynamic spatial hash, A* with corner-cut prevention, and deterministic biomes/zones/dungeons server and client both agree on.</p></div>
+          <div class="card"><h3><span class="feat-icon" aria-hidden="true">◇</span>Fog, bosses, day/night</h3><p>Three-tier fog of war persisted per 8 m chunk, four bosses with server-sent telegraphs, a 120 s day/night cycle, minimap, kill feed and a 5-quest chain.</p></div>
+          <div class="card"><h3><span class="feat-icon" aria-hidden="true">❄</span>Two renderers</h3><p>Three.js isometric 2.5D (instanced terrain, 2 draw calls) with a Canvas2D fallback that engages automatically on no WebGL or low FPS.</p></div>
+          <div class="card"><h3><span class="feat-icon" aria-hidden="true">✦</span>Prove it</h3><p>Sharded bot swarm with deterministic profiles, chaos + anti-cheat probes, per-player CSV reports, replay recorder/scrubber and an offline benchmark dashboard.</p></div>
         </div>
       </div>
-      <div class="sec"><h2>🖼 SCREENSHOTS</h2>
+      <div class="sec"><h2>▣ SCREENSHOTS</h2>
         <div class="shots">
           <!-- GIF slot: replace each .svg with a ~6s looped capture (see tools/capture/README.md).
                Files served from client/public/shots/ (/shots/...); SVG placeholders until F12 .png lands. -->
@@ -432,7 +480,7 @@ html[data-a11y-motion="reduced"] .float{animation:none}
           <div class="shot s3"><figure><img src="/shots/editor-boss-arena.svg" alt="Level editor — painted wall arena in the isometric world with the purple editor panel on top, a synced wall count, and exported aetherfall-walls JSON" loading="lazy" width="960" height="600"/><figcaption>LEVEL EDITOR — paint, export, server collision</figcaption></figure></div>
         </div>
       </div>
-      <div class="sec"><h2>⚙ UNDER THE HOOD</h2>
+      <div class="sec"><h2>◈ UNDER THE HOOD</h2>
         <div class="hood">
           <div class="stat"><b>7.44 ms</b><span>server tick average at 100 concurrent clients — 15% of the 50 ms budget at 20 Hz</span></div>
           <div class="stat"><b class="w">−93%</b><span>fewer snapshot bytes with the binary protocol v2 (measured against the JSON it replaces)</span></div>
@@ -440,7 +488,7 @@ html[data-a11y-motion="reduced"] .float{animation:none}
           <div class="stat"><b class="w">697</b><span>tests, 0 failing — including a byte-corruption sweep over every v2 frame type</span></div>
         </div>
         <div class="grid2">
-          <div class="card"><h3>📊 Measured, not estimated</h3>
+          <div class="card"><h3><span class="feat-icon" aria-hidden="true">§</span>Measured, not estimated</h3>
             <dl class="kv">
               <dt>tick @ 100 bots</dt><dd>7.44 ms avg · 15.57 ms p95 (budget 50 ms)</dd>
               <dt>tick @ 300 bots</dt><dd>8.53 ms avg · 17.99 ms p95</dd>
@@ -451,7 +499,7 @@ html[data-a11y-motion="reduced"] .float{animation:none}
             bottleneck, fan-out is. Full tables in <code>docs/BENCHMARKS.md</code>, including the run that was
             discarded and why.</p>
           </div>
-          <div class="card"><h3>🧬 Protocol v1 vs v2</h3>
+          <div class="card"><h3><span class="feat-icon" aria-hidden="true">⇄</span>Protocol v1 vs v2</h3>
             <table class="proto">
               <tr><th>60 moving entities</th><th class="num">bytes/frame</th><th class="num">vs v1</th></tr>
               <tr><td>v1 · JSON text (fallback: ?proto=1 / PROTO=1)</td><td class="num">7 755</td><td class="num">—</td></tr>
@@ -468,25 +516,27 @@ html[data-a11y-motion="reduced"] .float{animation:none}
           </div>
         </div>
         <div class="grid3" style="margin-top:12px">
-          <div class="card"><h3>🧠 Authoritative</h3><p>20 Hz server, 10 Hz interest-filtered snapshots, client prediction + reconciliation. The cheat surface is input timing and magnitude — five cheap checks, all counted in <code>/metrics</code>.</p></div>
-          <div class="card"><h3>🗺 Interest-culled</h3><p>40 m radius per viewer with <code>removed[]</code> eviction, backed by a cell-bucket index: <code>O(N×E)</code> → <code>O(N+E)</code>. Bandwidth scales with density, not with CCU.</p></div>
-          <div class="card"><h3>🧩 Built from scratch</h3><p>Sparse-set ECS, spatial hash, A* with corner rules, deterministic worldgen, binary codec, shard router, bot harness. No game engine, no networking library.</p></div>
+          <div class="card"><h3><span class="feat-icon" aria-hidden="true">◆</span>Authoritative</h3><p>20 Hz server, 10 Hz interest-filtered snapshots, client prediction + reconciliation. The cheat surface is input timing and magnitude — five cheap checks, all counted in <code>/metrics</code>.</p></div>
+          <div class="card"><h3><span class="feat-icon" aria-hidden="true">◇</span>Interest-culled</h3><p>40 m radius per viewer with <code>removed[]</code> eviction, backed by a cell-bucket index: <code>O(N×E)</code> → <code>O(N+E)</code>. Bandwidth scales with density, not with CCU.</p></div>
+          <div class="card"><h3><span class="feat-icon" aria-hidden="true">⬡</span>Built from scratch</h3><p>Sparse-set ECS, spatial hash, A* with corner rules, deterministic worldgen, binary codec, shard router, bot harness. No game engine, no networking library.</p></div>
         </div>
       </div>
       <div class="sec"><h2>⌨ CONTROLS</h2>
         <div class="card">
           <table class="controls">
-            <tr><th>input</th><th>action</th></tr>
+            <thead><tr><th>input</th><th>action</th></tr></thead>
+            <tbody>
             <tr><td><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> / arrows</td><td>move — server-authoritative, 8 u/s clamp</td></tr>
-            <tr><td><kbd>Space</kbd> / left-click / ⚔</td><td>attack nearest NPC within 3u</td></tr>
+            <tr><td><kbd>Space</kbd> / left-click / <span aria-hidden="true">⚔</span></td><td>attack nearest NPC within 3u</td></tr>
             <tr><td><kbd>Enter</kbd> then type</td><td>chat (<kbd>say</kbd>); <kbd>@maren &lt;text&gt;</kbd> talks to Elder Maren</td></tr>
             <tr><td><kbd>L</kbd> / <kbd>M</kbd></td><td>leaderboard / mute</td></tr>
             <tr><td>minimap · editor (?editormode=1)</td><td>live positions · paint walls, <kbd>E</kbd> exports JSON</td></tr>
-            <tr><td>📱 touch</td><td>left joystick to move, ⚔ button to attack</td></tr>
+            <tr><td>◉ touch</td><td>left joystick to move, <span aria-hidden="true">⚔</span> button to attack</td></tr>
+            </tbody>
           </table>
         </div>
       </div>
-      <div class="sec"><h2>📚 READ NEXT</h2>
+      <div class="sec"><h2>§ READ NEXT</h2>
         <div class="grid3">
           <div class="card"><h3>docs/ARCHITECTURE.md</h3><p>Full system design: tick pipeline diagram, data flow per frame, ECS and system order, interest management, persistence tiers, anti-cheat layers, protocol v1/v2, sharding — with real code excerpts.</p></div>
           <div class="card"><h3>docs/DEMO.md</h3><p>3-minute scripted demo with fallbacks, a 5-minute portfolio pitch, and "what to say about each subsystem" for interviews. Plus a 60-second version.</p></div>
@@ -496,9 +546,9 @@ html[data-a11y-motion="reduced"] .float{animation:none}
           <div class="card"><h3>What I learned</h3><p>Twelve engineering takeaways in the README — including the two I got wrong: profiling said serialization dominated, not the spatial query I assumed, and honest players need 5–37× anti-cheat headroom or the server bans its own users.</p></div>
         </div>
       </div>
-      <div class="sec dl"><h2>⬇ DOWNLOAD / QUICKSTART</h2>
+      <div class="sec dl"><h2>↓ DOWNLOAD / QUICKSTART</h2>
         <div class="grid2">
-          <div class="card"><h3>🚀 Run it locally</h3>
+          <div class="card"><h3><span class="feat-icon" aria-hidden="true">▸</span>Run it locally</h3>
             <pre>git clone https://github.com/Gourav-Shetty/AETHERFALL.git
 cd AETHERFALL
 npm install
@@ -506,7 +556,7 @@ npm run build --workspaces
 npm run dev:server   # :8081 WS + :9090 metrics
 npm run dev:client   # :5173 — open ?name=hero&amp;autojoin=1</pre>
           </div>
-          <div class="card"><h3>🤖 Living world in one line</h3>
+          <div class="card"><h3><span class="feat-icon" aria-hidden="true">✦</span>Living world in one line</h3>
             <p style="margin:0 0 8px"><code>SERVER=ws://localhost:8081 BOTS=20 node tools/bots/dist/index.js --duration 60</code> fills the arena with zero staging. Benchmarks at <code>tools/capture/dashboard.html</code>, 3-minute demo script at <code>docs/DEMO.md</code>.</p>
             <p style="margin:0 0 8px">Reproduce the headline number: <code>node tools/bots/dist/index.js --bots 100 --duration 20</code>, then <code>curl -s localhost:9090/metrics | findstr aetherfall_tick</code>.</p>
             <p style="margin:0">No Docker needed for dev — SQLite + in-memory fallback. Compose is opt-in for Postgres/Prometheus.</p>
@@ -514,7 +564,7 @@ npm run dev:client   # :5173 — open ?name=hero&amp;autojoin=1</pre>
         </div>
       </div>
       <div class="foot">
-        <span>Built with TypeScript · Three.js · ws · SQLite — <b>portfolio piece</b>, not a framework demo. MIT licensed.</span>
+        <span>Built with TypeScript · Three.js · ws · SQLite — <b>portfolio piece</b>, not a framework demo. MIT licensed.<span class="ver-badge">v0.1.0</span><span class="proto-badge">proto v2 · −93%</span></span>
         <span>docs/CLIENT.md · ?autojoin=1 for one-click demo</span>
       </div>
     </div></div>

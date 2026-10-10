@@ -7,13 +7,27 @@ import type { TerrainMapLike } from './terrain_view.js';
 import { a11y, HudNav, i18n, type AnnounceInput } from './a11y.js';
 
 const MAX_CHAT = 120;
-const BOSS_CSS = `
+export const BOSS_CSS = `
 .hud-tc{position:absolute;top:10px;left:50%;transform:translateX(-50%);width:min(420px,60vw);display:flex;flex-direction:column;gap:6px;pointer-events:none}
+.hud-bc{position:absolute;left:50%;bottom:12px;transform:translateX(-50%);width:min(440px,72vw);display:flex;flex-direction:column;gap:6px;pointer-events:none}
+.hud-vitals{background:rgba(13,19,38,.78);backdrop-filter:blur(8px);border:1px solid rgba(232,198,106,.35);border-radius:8px;padding:8px 10px}
+.vitals-row{display:flex;gap:10px;align-items:center}
+.vitals-bars{flex:1;display:flex;flex-direction:column;gap:5px;min-width:0}
+.level-badge{flex:none;width:44px;height:44px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:16px;color:#1a1200;background:radial-gradient(circle at 30% 30%,#f5d98a,#e8c66a 60%,#9a7a2e);border:1px solid #f5d98a}
+.bar.hp>i{background:linear-gradient(180deg,#ff7a6b,#b81e2c)}
+.bar.xp{height:8px}
+.bar.xp>i{background:linear-gradient(90deg,#c39bff,#6d28d9)}
 #hud-bosses{display:flex;flex-direction:column;gap:6px}
-.boss{background:rgba(10,14,20,.82);border:1px solid #3a4557;border-radius:6px;padding:5px 8px}
-.boss .boss-name{font-size:11px;letter-spacing:1px;color:#ffd9a0;text-shadow:0 1px 2px #000;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.boss{background:rgba(13,19,38,.78);backdrop-filter:blur(8px);border:1px solid rgba(232,198,106,.35);border-radius:8px;padding:5px 8px}
+.boss .boss-name{font-size:11px;letter-spacing:2px;text-transform:uppercase;color:#e8c66a;text-shadow:0 1px 2px #000;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .boss .boss-bar{position:relative;height:10px;background:#20262f;border:1px solid #10141b;border-radius:4px;margin-top:4px;overflow:hidden}
 .boss .boss-bar>i{display:block;height:100%;transition:width .2s}
+.feed-item{animation:feedIn .25s ease-out}
+@keyframes feedIn{from{transform:translateX(16px);opacity:0}}
+.chat-line{animation:chatIn .2s ease-out}
+@keyframes chatIn{from{transform:translateY(4px);opacity:0}}
+.chan-global{color:#4dc3ff} .chan-say{color:#59d98c} .chan-guild{color:#e8c66a}
+html[data-a11y-motion="reduced"] .feed-item,html[data-a11y-motion="reduced"] .chat-line{animation:none!important;transition:none!important}
 `;
 let bossCssInjected = false;
 
@@ -72,6 +86,7 @@ export class HUD {
   private bossesEl: HTMLElement;
   private hpBar: HTMLElement;
   private xpBar: HTMLElement;
+  private levelBadge: HTMLElement;
   private items: string[] = [];
   private quests: Array<{ title: string; obj: string; done?: boolean }> = [];
   private tiles = new ChunkCache();
@@ -89,17 +104,15 @@ export class HUD {
     this.root = root;
     const t = (k: Parameters<typeof i18n.t>[0]) => i18n.t(k);
     root.innerHTML = `
-      <div class="hud-tl">
+      <div class="hud-tl hud-quest-card"><div id="hud-quests" role="list" tabindex="0" aria-label="${t('hud.quests')}"></div></div>
+      <div class="hud-tr"><canvas id="hud-map" width="128" height="128" role="img" aria-label="${t('hud.minimap')}"></canvas><div id="hud-feed" role="log" aria-live="off" aria-label="${t('hud.killFeed')}"></div></div>
+      <div class="hud-tc"><div id="hud-bosses" role="group" aria-label="${t('hud.bossBar')}"></div></div>
+      <div class="hud-bc"><div class="hud-vitals"><div class="vitals-row"><div class="level-badge" id="hud-level" aria-hidden="true">1</div><div class="vitals-bars">
         <div class="bar hp" id="hud-hpbar" role="progressbar" aria-valuemin="0" aria-valuemax="100"
              aria-valuenow="100" aria-label="${t('hud.hp')}"><i id="hud-hpf"></i><span id="hud-hpt"></span></div>
         <div class="bar xp" id="hud-xpbar" role="progressbar" aria-valuemin="0" aria-valuemax="100"
              aria-valuenow="0" aria-label="${t('hud.xp')}"><i id="hud-xpf"></i><span id="hud-xpt"></span></div>
-        <div id="hud-inv" role="list" tabindex="0" aria-label="${t('hud.inventory')}"></div>
-      </div>
-      <div class="hud-tr"><div id="hud-feed" role="log" aria-live="off" aria-label="${t('hud.killFeed')}"></div></div>
-      <div class="hud-qr"><div id="hud-quests" role="list" tabindex="0" aria-label="${t('hud.quests')}"></div>
-        <canvas id="hud-map" width="128" height="128" role="img" aria-label="${t('hud.minimap')}"></canvas></div>
-      <div class="hud-tc"><div id="hud-bosses" role="group" aria-label="${t('hud.bossBar')}"></div></div>
+      </div></div><div id="hud-inv" role="list" tabindex="0" aria-label="${t('hud.inventory')}"></div></div></div>
       <div class="hud-bl"><div id="hud-chat" role="log" aria-live="off" aria-label="${t('hud.chat')}"></div>
         <div class="chat-row"><select id="hud-chan" aria-label="${t('hud.channel')}">
           <option value="global">${t('hud.channel.global')}</option>
@@ -123,6 +136,7 @@ export class HUD {
     this.bossesEl = el('#hud-bosses');
     this.hpBar = el('#hud-hpbar');
     this.xpBar = el('#hud-xpbar');
+    this.levelBadge = el('#hud-level');
     // Roving-tabindex keyboard nav: arrow keys move within the HUD, Tab moves
     // between widgets, Enter/Space activate the focused one.
     this.nav = new HudNav(root);
@@ -173,6 +187,7 @@ export class HUD {
     const frac = next > 0 ? Math.max(0, Math.min(1, xp / next)) : 0;
     this.xpFill.style.width = (frac * 100).toFixed(1) + '%';
     this.xpText.textContent = `${i18n.t('hud.level')} ${level} ${xp}/${next} ${i18n.t('hud.xp')}`;
+    try { this.levelBadge.textContent = String(level); } catch { /* stub DOM */ }
     setAttr(this.xpBar, 'aria-valuenow', String(Math.floor(xp)));
     setAttr(this.xpBar, 'aria-valuemax', String(next));
     setAttr(this.xpBar, 'aria-valuetext', `${level} ${xp}/${next}`);
@@ -286,9 +301,12 @@ export class HUD {
 // falls back to its raw name rather than rendering a bare `hud.channel.x` key.
 const chanKey = `hud.channel.${channel}` as Parameters<typeof i18n.t>[0];
 const chan = i18n.t(chanKey) === chanKey ? channel : i18n.t(chanKey);
+    // Channel-tinted tab: class is sanitised to [a-z] so a hostile channel name
+    // cannot inject markup; styling lives in BOSS_CSS + index.html (.chan-*).
+    const chanCls = `chan chan-${String(channel).replace(/[^a-z]/gi, '').toLowerCase() || 'global'}`;
     // Only server *prose* is translated; player-authored text stays verbatim.
     const shownFrom = from === 'server' || from === 'system' ? i18n.tServer(from) : from;
-    d.innerHTML = `<span class="chan">[${escapeHtml(chan)}]</span> <b>${escapeHtml(shownFrom)}:</b> ${escapeHtml(text)}`;
+    d.innerHTML = `<span class="${chanCls}">[${escapeHtml(chan)}]</span> <b>${escapeHtml(shownFrom)}:</b> ${escapeHtml(text)}`;
     this.chatLog.appendChild(d);
     while (this.chatLog.children.length > MAX_CHAT) this.chatLog.removeChild(this.chatLog.firstChild!);
     this.chatLog.scrollTop = this.chatLog.scrollHeight;

@@ -43,6 +43,9 @@
     "src/panels.ts",
     "src/panels.test.ts",
     "src/terrain_view.ts",
-    "src/terrain_view.test.ts"
+    "src/terrain_view.test.ts",
+    "src/hud.ts",
+    "src/renderer2d.ts",
+    "src/polish.test.ts"
   ]
 }
