@@ -18,6 +18,13 @@ import {
   esc,
 } from './social.js';
 import { MASK_GLYPHS } from './masks.js';
+import {
+  DeathExplain,
+  LevelUpBanner,
+  ObjectiveTracker,
+  TutorialTracker,
+  esc as escText,
+} from './onboarding.js';
 
 export const PANEL_CSS = `
 /* ---------- systems panels (additive, dark-fantasy glass) ---------- */
@@ -759,4 +766,429 @@ export class IntroCardOverlay {
     this.card.textContent = text;
     return true;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Onboarding panels (ADDITIVE): objective tracker, level-up banner, death card
+// ---------------------------------------------------------------------------
+// Same conventions as every panel above: own root, own stylesheet, revision-
+// gated render, `ownerDocument` element factory (headless-safe), escaped
+// server text. Nothing above is modified.
+//
+// Layout is deliberately NOT a redesign: the tracker docks to the bottom-left
+// strip next to the existing quest card, the banner is centred over the vitals
+// for a couple of seconds, and the death card sits in the same corner as the
+// existing death overlay. All three degrade to plain text, so the animation is
+// the only thing reduced-motion removes.
+
+export const ONBOARDING_PANEL_CSS = `
+/* ---------- onboarding: objective tracker / level-up / death ---------- */
+.af-objectives{position:absolute;left:10px;bottom:120px;width:290px;max-width:38vw;z-index:7;
+  background:rgba(13,19,38,.8);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+  border:1px solid rgba(232,198,106,.4);border-left:3px solid #e8c66a;border-radius:8px;
+  box-shadow:0 8px 24px rgba(0,0,0,.45);padding:7px 10px;font-size:12px;display:none}
+.af-objectives.open{display:block}
+.af-obj-track{font-size:10px;letter-spacing:2px;color:#8fa3bf;text-transform:uppercase}
+.af-obj-head{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-top:2px}
+.af-obj-name{color:#e8efff;font-weight:700;font-size:13px;line-height:1.25}
+.af-obj-count{color:#ffe066;font-size:12px;white-space:nowrap;font-variant-numeric:tabular-nums}
+.af-obj-hint{color:#cfe3ff;font-size:11px;line-height:1.35;margin-top:3px}
+.af-obj-bar{margin-top:5px;height:4px;background:#20262f;border:1px solid #10141b;border-radius:2px;overflow:hidden}
+.af-obj-bar>i{display:block;height:100%;background:linear-gradient(90deg,#e8c66a,#ffe066);transition:width .25s}
+.af-obj-next{margin-top:5px;font-size:10px;color:#8fa3bf}
+.af-obj-next b{color:#59d98c;font-weight:600}
+.af-obj-steps{margin-top:5px;border-top:1px solid rgba(58,69,87,.6);padding-top:4px}
+.af-obj-step{display:grid;grid-template-columns:14px 1fr;gap:5px;font-size:11px;color:#8fa3bf;padding:1px 0}
+.af-obj-step.done{opacity:.55;text-decoration:line-through}
+.af-obj-step.active{color:#e8efff}
+.af-obj-step .af-obj-dot{color:#e8c66a}
+/* level-up banner */
+.af-levelup{position:absolute;left:50%;top:96px;transform:translateX(-50%);z-index:12;pointer-events:none;
+  background:linear-gradient(180deg,rgba(28,22,6,.94),rgba(13,19,38,.94));
+  border:1px solid #e8c66a;border-radius:10px;padding:10px 22px;text-align:center;display:none;
+  box-shadow:0 0 24px rgba(232,198,106,.35),0 10px 30px rgba(0,0,0,.5)}
+.af-levelup.open{display:block}
+.af-levelup.enter{animation:afLevelIn .28s cubic-bezier(.2,.9,.3,1)}
+.af-levelup .af-lu-title{font-size:24px;font-weight:800;letter-spacing:3px;color:#ffe066;text-shadow:0 2px 0 rgba(0,0,0,.6)}
+.af-levelup .af-lu-detail{margin-top:3px;font-size:12px;color:#cfe3ff}
+.af-levelup .af-lu-rule{height:1px;background:linear-gradient(90deg,transparent,#e8c66a,transparent);margin:6px 0}
+/* death card — informational only: it never steals a click from the death
+   overlay's Respawn button, and it sits clear of the overlay's centre. */
+.af-deathcard{position:absolute;left:50%;top:150px;transform:translateX(-50%);z-index:11;width:min(400px,80vw);
+  pointer-events:none;background:rgba(8,10,20,.92);border:1px solid rgba(255,82,82,.55);border-radius:10px;
+  padding:12px 16px;box-shadow:0 12px 40px rgba(0,0,0,.6);display:none}
+.af-deathcard.open{display:block}
+.af-deathcard h3{margin:0 0 6px;font-size:14px;letter-spacing:3px;color:#ff8080}
+.af-deathcard .af-dc-body{font-size:12px;line-height:1.5;color:#e8efff}
+.af-deathcard .af-dc-where{margin-top:6px;font-size:12px;color:#59d98c}
+.af-deathcard .af-dc-penalty{margin-top:4px;font-size:11px;color:#8fa3bf}
+/* reduced motion: state stays, movement goes */
+@keyframes afLevelIn{from{opacity:0;transform:translate(-50%,-14px)}}
+html[data-a11y-motion="reduced"] .af-levelup.enter{animation:none!important}
+html[data-a11y-motion="reduced"] .af-obj-bar>i{transition:none!important}
+@media (prefers-reduced-motion:reduce){.af-levelup.enter{animation:none}.af-obj-bar>i{transition:none}}
+`;
+
+let onboardingCssInjected = false;
+
+function injectOnboardingCss(parent: HTMLElement): void {
+  if (onboardingCssInjected) return;
+  onboardingCssInjected = true;
+  try {
+    const doc = parent.ownerDocument;
+    if (!doc) return;
+    const style = doc.createElement('style');
+    style.textContent = ONBOARDING_PANEL_CSS;
+    doc.head.appendChild(style);
+  } catch {
+    /* detached document: markup still renders */
+  }
+}
+
+function makeOnboardingEl(parent: HTMLElement, tag: string, className = ''): HTMLElement {
+  const doc = parent.ownerDocument;
+  if (!doc) throw new Error('onboarding panels: root has no ownerDocument');
+  const el = doc.createElement(tag);
+  if (className) el.className = className;
+  return el;
+}
+
+/** Defensive attribute write — the headless DOM stub has no setAttribute. */
+function setAttr(el: HTMLElement | null | undefined, k: string, v: string): void {
+  try {
+    el?.setAttribute(k, v);
+  } catch {
+    /* non-DOM element (test stub) */
+  }
+}
+
+/**
+ * The persistent objective tracker.
+ *
+ * Always visible while a track is running (it is the "what do I do next"
+ * answer, not a menu), compact enough to sit under the quest card, and
+ * readable at a glance: track name, the objective, the live count, and the
+ * control that achieves it. Reduced motion drops the bar's width transition;
+ * the numbers stay.
+ */
+export class ObjectiveTrackerPanel {
+  readonly el: HTMLElement;
+  private trackEl: HTMLElement;
+  private nameEl: HTMLElement;
+  private countEl: HTMLElement;
+  private hintEl: HTMLElement;
+  private barEl: HTMLElement;
+  private nextEl: HTMLElement;
+  private stepsEl: HTMLElement;
+  private lastRevision = -1;
+  private lastKey = '';
+  /** Expanded step list (tutorial only); off by default for compactness. */
+  showSteps = false;
+
+  constructor(
+    parent: HTMLElement,
+    private tracker: ObjectiveTracker,
+    private tutorial?: TutorialTracker,
+    private reducedMotion = false,
+  ) {
+    injectOnboardingCss(parent);
+    const root = makeOnboardingEl(parent, 'div', 'af-objectives');
+    root.id = 'af-objectives';
+    this.trackEl = makeOnboardingEl(parent, 'div', 'af-obj-track');
+    root.appendChild(this.trackEl);
+
+    const head = makeOnboardingEl(parent, 'div', 'af-obj-head');
+    this.nameEl = makeOnboardingEl(parent, 'div', 'af-obj-name');
+    this.countEl = makeOnboardingEl(parent, 'div', 'af-obj-count');
+    head.appendChild(this.nameEl);
+    head.appendChild(this.countEl);
+    root.appendChild(head);
+
+    this.hintEl = makeOnboardingEl(parent, 'div', 'af-obj-hint');
+    root.appendChild(this.hintEl);
+
+    const bar = makeOnboardingEl(parent, 'div', 'af-obj-bar');
+    this.barEl = makeOnboardingEl(parent, 'i');
+    bar.appendChild(this.barEl);
+    root.appendChild(bar);
+
+    this.nextEl = makeOnboardingEl(parent, 'div', 'af-obj-next');
+    root.appendChild(this.nextEl);
+
+    this.stepsEl = makeOnboardingEl(parent, 'div', 'af-obj-steps');
+    this.stepsEl.id = 'af-obj-steps';
+    root.appendChild(this.stepsEl);
+
+    parent.appendChild(root);
+    this.el = root;
+    this.applyMotion();
+  }
+
+  setReducedMotion(on: boolean): void {
+    this.reducedMotion = on;
+    this.tracker.setReducedMotion(on);
+    this.tutorial?.setReducedMotion(on);
+    this.applyMotion();
+    this.lastKey = '';
+  }
+
+  private applyMotion(): void {
+    if (this.reducedMotion) this.el.setAttribute('data-motion', 'reduced');
+    else if (this.el.removeAttribute) this.el.removeAttribute('data-motion');
+  }
+
+  toggleSteps(): void {
+    this.showSteps = !this.showSteps;
+    this.lastKey = '';
+  }
+
+  render(): boolean {
+    const body = this.tracker.body();
+    const next = this.tracker.next();
+    const ahead = this.tracker.upcoming(1)[0];
+    const key = `${body.heading}|${body.headline}|${body.detail}|${ahead?.id ?? '-'}|${this.showSteps ? 1 : 0}|${this.tutorial?.revision ?? 0}`;
+    if (key === this.lastKey && this.tracker.revision === this.lastRevision) return false;
+    this.lastKey = key;
+    this.lastRevision = this.tracker.revision;
+    this.el.classList.add('open');
+    this.trackEl.textContent = body.heading;
+    this.nameEl.textContent = body.headline;
+    this.countEl.textContent = body.progress;
+    this.hintEl.textContent = body.detail;
+    const frac = next && next.goal > 0 ? Math.max(0, Math.min(1, next.count / next.goal)) : 1;
+    this.barEl.style.width = `${(frac * 100).toFixed(1)}%`;
+    this.nextEl.innerHTML = ahead
+      ? `next · <b>${escText(ahead.name)}</b> — ${escText(ahead.hint)}`
+      : 'next · keep hunting — every beast feeds Elder Maren at the shrine (50, 50)';
+    this.renderSteps();
+    return true;
+  }
+
+  /** The expanded tutorial checklist (toggle; off by default). */
+  private renderSteps(): void {
+    if (!this.showSteps || !this.tutorial) {
+      if (this.stepsEl.innerHTML !== '') this.stepsEl.innerHTML = '';
+      return;
+    }
+    const html = this.tutorial
+      .toRows()
+      .map(
+        (r) =>
+          `<div class="af-obj-step${r.done ? ' done' : ''}${r.active ? ' active' : ''}">` +
+          `<span class="af-obj-dot">${r.done ? '✔' : r.active ? '▶' : '·'}</span>` +
+          `<span>${escText(r.label)} — ${escText(r.detail)}</span>` +
+          '</div>',
+      )
+      .join('');
+    if (this.stepsEl.innerHTML !== html) this.stepsEl.innerHTML = html;
+  }
+
+  /** Screen-reader line for the current objective. */
+  narrate(): string {
+    return this.tutorial?.narrate() ?? this.tracker.body().detail;
+  }
+}
+
+/**
+ * The level-up banner.
+ *
+ * Deliberately loud: a big centred plate with the level, the numbers that
+ * produced it, and the talent point when the systems path reports one. It
+ * holds for `banner.holdMs` and then hides itself — the caller drives the
+ * clock through `banner.tick(now)`, so the panel never owns a timer.
+ */
+export class LevelUpPanel {
+  readonly el: HTMLElement;
+  private titleEl: HTMLElement;
+  private detailEl: HTMLElement;
+  private lastKey = '';
+  private reducedMotion: boolean;
+
+  constructor(parent: HTMLElement, private banner: LevelUpBanner, reducedMotion = false) {
+    injectOnboardingCss(parent);
+    const root = makeOnboardingEl(parent, 'div', 'af-levelup');
+    root.id = 'af-levelup';
+    root.setAttribute('role', 'status');
+    root.setAttribute('aria-live', 'polite');
+    this.titleEl = makeOnboardingEl(parent, 'div', 'af-lu-title');
+    root.appendChild(this.titleEl);
+    root.appendChild(makeOnboardingEl(parent, 'div', 'af-lu-rule'));
+    this.detailEl = makeOnboardingEl(parent, 'div', 'af-lu-detail');
+    root.appendChild(this.detailEl);
+    parent.appendChild(root);
+    this.el = root;
+    this.reducedMotion = reducedMotion;
+    this.banner.setReducedMotion(reducedMotion);
+    this.applyMotion();
+  }
+
+  setReducedMotion(on: boolean): void {
+    this.reducedMotion = on;
+    this.banner.setReducedMotion(on);
+    this.applyMotion();
+    this.lastKey = '';
+  }
+
+  private applyMotion(): void {
+    if (this.reducedMotion) this.el.setAttribute('data-motion', 'reduced');
+    else if (this.el.removeAttribute) this.el.removeAttribute('data-motion');
+    this.el.classList.toggle('enter', !this.reducedMotion);
+  }
+
+  render(): boolean {
+    const v = this.banner.current();
+    const key = `${v.show}:${v.level}:${v.detail}`;
+    if (key === this.lastKey) return false;
+    const wasShown = this.el.classList.contains('open');
+    this.lastKey = key;
+    if (!v.show) {
+      this.el.classList.remove('open');
+      this.titleEl.textContent = '';
+      this.detailEl.textContent = '';
+      return wasShown;
+    }
+    this.el.classList.add('open');
+    this.titleEl.textContent = v.headline;
+    this.detailEl.textContent = v.detail;
+    setAttr(this.el, 'aria-label', `${v.headline}. ${v.detail}`);
+    if (this.reducedMotion) this.el.classList.remove('enter');
+    return true;
+  }
+}
+
+/**
+ * The death card: what happened, where you wake, what it cost.
+ *
+ * The respawn itself is untouched (the server still moves the player and
+ * broadcasts `respawn`); this only adds the sentence that was missing. It
+ * auto-hides after `explain.holdMs`, driven by `explain.tick(now)`.
+ */
+export class DeathPanel {
+  readonly el: HTMLElement;
+  private bodyEl: HTMLElement;
+  private whereEl: HTMLElement;
+  private penaltyEl: HTMLElement;
+  private lastKey = '';
+
+  constructor(parent: HTMLElement, private explain: DeathExplain) {
+    injectOnboardingCss(parent);
+    const root = makeOnboardingEl(parent, 'div', 'af-deathcard');
+    root.id = 'af-deathcard';
+    root.setAttribute('role', 'alertdialog');
+    const head = makeOnboardingEl(parent, 'h3');
+    head.textContent = 'YOU FELL';
+    root.appendChild(head);
+    this.bodyEl = makeOnboardingEl(parent, 'div', 'af-dc-body');
+    root.appendChild(this.bodyEl);
+    this.whereEl = makeOnboardingEl(parent, 'div', 'af-dc-where');
+    root.appendChild(this.whereEl);
+    this.penaltyEl = makeOnboardingEl(parent, 'div', 'af-dc-penalty');
+    root.appendChild(this.penaltyEl);
+    parent.appendChild(root);
+    this.el = root;
+  }
+
+  render(): boolean {
+    const v = this.explain.current();
+    const key = `${v.show}:${v.body}`;
+    if (key === this.lastKey) return false;
+    this.lastKey = key;
+    if (!v.show) {
+      this.el.classList.remove('open');
+      this.bodyEl.textContent = '';
+      this.whereEl.textContent = '';
+      this.penaltyEl.textContent = '';
+      return true;
+    }
+    this.el.classList.add('open');
+    this.bodyEl.textContent = v.body;
+    this.whereEl.textContent = v.respawnLabel;
+    this.penaltyEl.textContent = v.penalty;
+    setAttr(this.el, 'aria-label', `${v.title}. ${v.body} ${v.respawnLabel} ${v.penalty}`);
+    return true;
+  }
+}
+
+/**
+ * One-call bundle for the game shell: builds the three panels plus the tracker
+ * they share, and exposes a single `handleEvent` the event pump can call.
+ *
+ * This exists so wiring the onboarding UI into a live client is one import and
+ * one line rather than a dozen, and so the whole surface can be driven headless
+ * in tests through the same entry point.
+ */
+export interface OnboardingUi {
+  objectives: ObjectiveTrackerPanel;
+  levelUp: LevelUpPanel;
+  death: DeathPanel;
+  tutorial: TutorialTracker;
+  tracker: ObjectiveTracker;
+  banner: LevelUpBanner;
+  explain: DeathExplain;
+  /** Feed a server `event` frame. Returns true when the onboarding UI used it. */
+  handleEvent(kind: string, payload: Record<string, unknown> | null, selfId?: number): boolean;
+  /** Drive the auto-dismiss clocks + repaint. */
+  render(now: number): boolean;
+  setReducedMotion(on: boolean): void;
+}
+
+export function mountOnboardingUi(
+  parent: HTMLElement,
+  opts: { selfId?: () => number; reducedMotion?: boolean } = {},
+): OnboardingUi {
+  const reduced = opts.reducedMotion ?? false;
+  const tutorial = new TutorialTracker();
+  const tracker = new ObjectiveTracker();
+  const banner = new LevelUpBanner();
+  const explain = new DeathExplain();
+  const objectives = new ObjectiveTrackerPanel(parent, tracker, tutorial, reduced);
+  const levelUp = new LevelUpPanel(parent, banner, reduced);
+  const death = new DeathPanel(parent, explain);
+  const selfId = opts.selfId ?? (() => -1);
+
+  return {
+    objectives,
+    levelUp,
+    death,
+    tutorial,
+    tracker,
+    banner,
+    explain,
+    handleEvent(kind, payload, id = selfId()) {
+      const p = payload ?? {};
+      const owner = typeof p['playerId'] === 'number' ? (p['playerId'] as number) : null;
+      if (owner !== null && id >= 0 && owner !== id) return false;
+      let used = false;
+      if (kind === 'quest-progress' || kind === 'quest-complete') {
+        const qid = typeof p['questId'] === 'string' ? (p['questId'] as string) : '';
+        if (qid) {
+          const count = typeof p['count'] === 'number' ? (p['count'] as number) : 0;
+          const goal = typeof p['goal'] === 'number' ? (p['goal'] as number) : 0;
+          if (tracker.applyEvent(kind, qid, count, goal)) used = true;
+          if (tutorial.applyEvent(kind, qid, count, goal)) used = true;
+        }
+      } else if (kind === 'levelup') {
+        if (banner.raise(p)) used = true;
+      } else if (kind === 'respawn') {
+        const target = typeof p['id'] === 'number' ? (p['id'] as number) : -1;
+        if (target === id || target === -1) {
+          explain.raise(typeof p['killer'] === 'string' ? (p['killer'] as string) : undefined);
+          used = true;
+        }
+      }
+      return used;
+    },
+    render(now: number) {
+      let touched = false;
+      if (banner.tick(now)) touched = true;
+      if (explain.tick(now)) touched = true;
+      return objectives.render() || levelUp.render() || death.render() || touched;
+    },
+    setReducedMotion(on: boolean) {
+      objectives.setReducedMotion(on);
+      levelUp.setReducedMotion(on);
+      tutorial.setReducedMotion(on);
+      tracker.setReducedMotion(on);
+    },
+  };
 }

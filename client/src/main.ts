@@ -17,13 +17,14 @@ import { SettingsStore, qualityCaps } from './settings.js';
 import { Joystick, blendMove } from './joystick.js';
 import { FOG_RADIUS, FogOfWar, fogChunkKey, installFogPersistence } from './fog.js';
 import { ChainTracker } from './quests.js';
+import { spineLabel } from './onboarding.js';
 import { bossBars, relevantBossBars } from './bosses.js';
 // SYSTEMS-HOOK (systems integration): additive panels over the server's composed
 // systems events (party / emotes / vendor / talents). Nothing existing is
 // replaced; see docs/SYSTEMS.md#Integration for the chat-command reference.
 import { SystemsView } from './social.js';
 import { VOCATION_COLORS, nametagFor } from './masks.js';
-import { EmoteBubbleLayer, PartyPanel, TalentPanel, VendorPanel } from './panels.js';
+import { EmoteBubbleLayer, PartyPanel, TalentPanel, VendorPanel, mountOnboardingUi } from './panels.js';
 import { TerrainView, zVisual } from './terrain_view.js';
 import { AssetLoader, DEFAULT_ART } from './assets.js';
 // FEEDBACK: the combat feel layer. Pure rules live in feedback.ts (pooled
@@ -117,6 +118,17 @@ const talentPanel = new TalentPanel(document.getElementById('hud')!, systems.pro
 });
 // Bubbles live in #labels (the world-space overlay), not #hud (screen space).
 const bubbleLayer = new EmoteBubbleLayer(labelsEl, systems.emotes);
+
+// ONBOARDING-HOOK (first five minutes): the objective tracker, the level-up
+// banner and the death explainer. Everything it shows arrives on the EXISTING
+// `quest-progress` / `quest-complete` / `levelup` / `respawn` events, so there
+// is no new wire format; `handleEvent` is fed from `net.onEvent` below and the
+// panels repaint from the frame loop. Reduced motion is honoured through the
+// same a11y setting as the rest of the HUD.
+const onboarding = mountOnboardingUi(document.getElementById('hud')!, {
+  selfId: () => net.id,
+  reducedMotion: a11y.get().reducedMotion,
+});
 
 /** World -> screen for whichever renderer is live. `iso`/`c2d`/`cam` are read at
  *  call time, and `cam` is declared further down with the frame loop. */
@@ -561,7 +573,7 @@ a11y.install(document);
 // A palette change must reach the HUD colour table AND both renderers
 // immediately (entity bodies + telegraph rings, not just the minimap). The
 // a11y motion/contrast flags also re-gate the floating damage numbers.
-a11y.onChange = () => { applyPalette(); applyFeedbackSettings(); hud.relocalize(); syncA11yPanel(); };
+a11y.onChange = () => { applyPalette(); applyFeedbackSettings(); hud.relocalize(); syncA11yPanel(); onboarding.setReducedMotion(a11y.get().reducedMotion); };
 
 /** Push the active colourblind-safe palette into whichever renderer is live. */
 function applyPalette(): void {
@@ -921,6 +933,9 @@ net.onEvent = (kind, payload) => {
     vendorPanel.render();
     talentPanel.render();
   }
+  // ONBOARDING-HOOK: objective tracker + level-up banner + death explainer,
+  // all off the existing event kinds.
+  onboarding.handleEvent(kind, (payload ?? null) as Record<string, unknown> | null);
   const p = (payload ?? null) as Record<string, unknown> | null;
   const num = (k: string): number | null => {
     const v = p?.[k];
@@ -1077,6 +1092,19 @@ net.onEvent = (kind, payload) => {
       if (!forMe()) break;
       const qid = str('questId');
       if (!qid) break;
+      // ONBOARDING-HOOK: a tutorial/Road completion is NOT an Elder Maren
+      // quest. Announce it as a milestone and hand the player straight to the
+      // next thing instead of leaving the chain card as the last word.
+      if (onboarding.tracker.isOnboardingId(qid)) {
+        const label = spineLabel(qid) ?? qid;
+        const nextStep = onboarding.tracker.next();
+        const tail = nextStep ? ` next: ${nextStep.name} — ${nextStep.hint}` : '';
+        toast(`✔ ${label}${tail}`, 3600);
+        sound.quest();
+        hud.announceQuest('complete', label);
+        onboarding.render(performance.now());
+        break;
+      }
       const done = chain.onQuestComplete(qid);
       hud.setQuests(chain.toHud());
       if (done) {
@@ -1447,6 +1475,9 @@ function frame(now: number) {
   // #labels is displayed in three mode, so bubbles follow that switch.
   labelsEl.style.display = iso && activeMode === 'three' ? 'block' : 'none';
   bubbleLayer.render(now, projectWorld);
+  // ONBOARDING-HOOK: objective tracker + level-up banner + death card. All
+  // three are revision-gated, so a quiet tick costs one map lookup.
+  onboarding.render(now);
   if (now - lastStatus > 500) {
     lastStatus = now;
     // Surface the negotiated wire protocol so the v2 default can be verified live

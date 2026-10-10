@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { ChainTracker } from './quests.js';
+import { ChainTracker, QUEST_PLAY_ORDER, isSpineQuestId, playOrderStage } from './quests.js';
 
 describe('ChainTracker', () => {
   it('mirrors the 5-quest Elder Maren chain in order', () => {
@@ -115,5 +115,47 @@ describe('ChainTracker', () => {
     const c = new ChainTracker();
     c.onXpGain(50);
     assert.equal(c.questById('ward-spark')!.count, 0);
+  });
+});
+
+describe('quest play order (the shared spine)', () => {
+  it('stages every auto-advancing family exactly once, tutorial first', () => {
+    assert.deepEqual(QUEST_PLAY_ORDER.map((e) => e.stage), [1, 2, 3, 4, 5]);
+    assert.deepEqual(QUEST_PLAY_ORDER.map((e) => e.track), ['tutorial', 'road', 'trio', 'maren', 'chapter']);
+    const ids = QUEST_PLAY_ORDER.flatMap((e) => e.ids);
+    assert.equal(new Set(ids).size, ids.length, 'no id appears in two stages');
+    // The trio is stated in play order (kill -> collect -> explore).
+    assert.deepEqual(QUEST_PLAY_ORDER[2]!.ids, ['slay5', 'gather10', 'explorer']);
+  });
+
+  it('every quest the other trackers know about has a stage', () => {
+    const chain = new ChainTracker();
+    for (const q of chain.quests) {
+      const stage = playOrderStage(q.id);
+      assert.ok(stage, `${q.id} is missing from the play order`);
+      assert.equal(stage.track, 'maren');
+    }
+    for (const id of ['static-porchlight', 'static-kiosk', 'static-arcade', 'static-meridian', 'static-exchange']) {
+      assert.equal(playOrderStage(id)!.track, 'chapter');
+    }
+    assert.equal(playOrderStage('not-a-quest'), null);
+  });
+
+  it('separates the onboarding spine from the story tracks', () => {
+    for (const id of ['tut-first-steps', 'tut-signature', 'road-first-blood', 'road-lookout']) {
+      assert.equal(isSpineQuestId(id), true, `${id} should be spine`);
+      assert.equal(playOrderStage(id)!.stage <= 2, true);
+    }
+    for (const id of ['slay5', 'ward-spark', 'static-kiosk']) {
+      assert.equal(isSpineQuestId(id), false, `${id} should not be spine`);
+    }
+  });
+
+  it('the chain tracker ignores spine traffic (the two views never collide)', () => {
+    const c = new ChainTracker();
+    assert.equal(c.onQuestProgress('tut-first-steps', 1, 1), false);
+    assert.equal(c.onQuestComplete('road-first-blood'), null);
+    assert.equal(c.activeIndex(), 0, 'the chain pointer never moved');
+    assert.equal(c.questById('tut-first-steps'), undefined);
   });
 });

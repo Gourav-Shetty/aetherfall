@@ -27,7 +27,21 @@ import { canFinishMob, isMobDowned } from './melee/downed.js';
 import { firstWeapon, inThrowRange, landingPos, pickupRadiusFor } from './melee/throw.js';
 import { getZone, spawnAnchorFor } from '@aetherfall/engine';
 import { createInventory, makePickup, removeItem, tryPickup, type Inventory, type Pickup } from './inventory.js';
-import { addXp, chunkKeyOf, createQuestState, onCollect, onExplore, type QuestEvent, type QuestState } from './quests.js';
+import { addXp, chunkKeyOf, createQuestState, onCollect, onExplore, xpForNextLevel, type QuestEvent, type QuestState } from './quests.js';
+import {
+  FIRST_BLOOD_COUNT,
+  FIRST_BLOOD_ITEM,
+  bindTutorialQuests,
+  consumeFirstBloodGift,
+  drainOnboardingEvents,
+  forgetTutorial,
+  noteBossKilled,
+  noteChunkExplored,
+  noteMeleeSwing,
+  notePickupCollected,
+  notePlayerPosition,
+  startTutorial,
+} from './onboarding.js';
 import { applyBossKillRewards, applyKillRewards } from './loot.js';
 import { chainOnCollect, weaponDef, type BossName } from './content.js';
 import { GuildStore } from './guilds.js';
@@ -38,6 +52,7 @@ import { cancelTrade, tradeReady, tryCompleteTrade, type TradeSession } from './
 export * from './combat.js';
 export * from './inventory.js';
 export * from './quests.js';
+export * from './onboarding.js';
 export * from './content.js';
 export * from './loot.js';
 export * from './trading.js';
@@ -157,6 +172,7 @@ export function playerMeleeAttack(
       const fin = game.spawner.finishMob(downed.id, now);
       if (fin) {
         const events: GameEvent[] = creditKill(game, player, fin.mob, rand, { finisher: true, bonusRolls: opts.bonusRolls ?? 0 });
+        noteMeleeSwing(playerId, player.quests, fin.mob.id, 0, true);
         return {
           ok: true,
           mobId: fin.mob.id,
@@ -189,6 +205,7 @@ export function playerMeleeAttack(
     const fin = game.spawner.finishMob(target.id, now);
     if (!fin) return { ok: false, reason: 'no-target', events: empty };
     const events: GameEvent[] = creditKill(game, player, fin.mob, rand, { finisher: true, bonusRolls: opts.bonusRolls ?? 0 });
+    noteMeleeSwing(playerId, player.quests, fin.mob.id, 0, true);
     return {
       ok: true,
       mobId: fin.mob.id,
@@ -229,6 +246,7 @@ export function playerMeleeAttack(
         },
       },
     ];
+    noteMeleeSwing(playerId, player.quests, downed.id, removed, false);
     return {
       ok: true,
       mobId: downed.id,
@@ -244,6 +262,9 @@ export function playerMeleeAttack(
 
   const hit = game.spawner.damageMob(target.id, res.dmg, now);
   if (!hit) return { ok: false, reason: 'no-target', events: empty };
+  // A direct kill here is NOT a finisher (lethal melee swings take the downed
+  // branch above), so step 3 must not be credited from this path.
+  noteMeleeSwing(playerId, player.quests, hit.mob.id, hit.dmg, false);
 
   // `damageMob` already marked the corpse and armed the respawn timer, so the
   // payout runs through `creditKill` directly — routing it back through
@@ -339,6 +360,11 @@ export function ensurePlayer(game: GameState, id: number, name: string, x = spaw
   if (!p) {
     p = { id, name, x, y, inv: createInventory(), quests: createQuestState(), seenChunks: new Set() };
     game.players.set(id, p);
+    // ONBOARDING: the tutorial track anchors its step-1 distance predicate to
+    // the join position and binds the player's QuestState so signals raised by
+    // the systems layer (masks, signatures) can still advance it.
+    startTutorial(id, x, y);
+    bindTutorialQuests(id, p.quests);
   }
   p.x = x;
   p.y = y;
@@ -352,6 +378,9 @@ export function removePlayer(game: GameState, id: number): void {
     if ((t.a === id || t.b === id) && t.state === 'open') cancelTrade(t, 'party-left');
   }
   clearMeleeCooldown(game, id);
+  // ONBOARDING: drop the tutorial record so the registry stays bounded by the
+  // live player count and a reconnect re-anchors at the new spawn position.
+  forgetTutorial(id);
 }
 
 export function setPlayerPos(game: GameState, id: number, x: number, y: number): void {
@@ -440,6 +469,19 @@ function creditKill(
       payload: { id: pk.id, itemId: pk.itemId, count: pk.count, x: pk.x, y: pk.y },
     });
   }
+  // ONBOARDING: one guaranteed drop at the player's very first corpse. Loot
+  // tables are probabilistic by design; at minute zero "I killed something and
+  // there is nothing on the ground" reads as a broken game, so the FIRST kill
+  // of every account always leaves one ember-shard to walk over. Once per
+  // player, no drop table or catalog entry is touched.
+  if (consumeFirstBloodGift(playerId)) {
+    const gift = makePickup(FIRST_BLOOD_ITEM, FIRST_BLOOD_COUNT, mob.pos.x, mob.pos.y);
+    game.pickups.push(gift);
+    out.push({
+      kind: 'pickup-spawn',
+      payload: { id: gift.id, itemId: gift.itemId, count: gift.count, x: gift.x, y: gift.y },
+    });
+  }
   void drops;
   return out;
 }
@@ -503,6 +545,9 @@ export function onBossKilled(
       payload: { id: pk.id, itemId: pk.itemId, count: pk.count, x: pk.x, y: pk.y },
     });
   }
+  // ONBOARDING: a boss is a kill for the Road ladder (and for a finisher, for
+  // step 3), never for the ordinary "land a hit" step.
+  noteBossKilled(playerId, player.quests, finisher);
   return out;
 }
 
@@ -652,6 +697,10 @@ export function collectPickup(game: GameState, playerId: number, pickupId: numbe
   ];
   for (const e of onCollect(player.quests, pickup.count)) out.push(questEvent(game, playerId, e));
   for (const e of chainOnCollect(player.quests, pickup.count)) out.push(questEvent(game, playerId, e));
+  // ONBOARDING: tutorial step 4 ("take what it dropped") + the Road's collect
+  // step ride the ONE authoritative pickup path, so a pickup that moved from
+  // the corpse to the bag always counts exactly once.
+  notePickupCollected(playerId, player.quests, pickup.itemId, pickup.count);
   return out;
 }
 
@@ -690,6 +739,12 @@ export function tickGameplay(game: GameState, now: number): GameEvent[] {
     const key = chunkKeyOf(p.x, p.y);
     const evts: QuestEvent[] = onExplore(p.quests, p.seenChunks, key);
     for (const e of evts) out.push(questEvent(game, p.id, e));
+    // ONBOARDING: three cheap reads per player per tick — step 1's distance
+    // predicate, the Road's explore step, and the drain that turns every
+    // latched objective into quest-progress / quest-complete / levelup.
+    notePlayerPosition(p.id, p.x, p.y);
+    noteChunkExplored(p.id, p.quests, p.seenChunks, key);
+    for (const e of drainOnboardingEvents(p.id, p.quests)) out.push(questEvent(game, p.id, e));
   }
 
   // 2. Mob respawns (5s) -> events.
@@ -739,10 +794,25 @@ export function tickGameplay(game: GameState, now: number): GameEvent[] {
 }
 
 function questEvent(game: GameState, playerId: number, e: QuestEvent): GameEvent {
-  void game;
   if (e.type === 'progress') return { kind: 'quest-progress', payload: { playerId, ...e } };
   if (e.type === 'complete') return { kind: 'quest-complete', payload: { playerId, ...e } };
-  return { kind: 'levelup', payload: { playerId, level: e.level } };
+  // ONBOARDING: a level-up used to be a bare `level` number, which the HUD
+  // folded into the XP bar with no ceremony — indistinguishable from a stray
+  // number. The payload now carries the surrounding numbers the banner needs
+  // ("LEVEL 3 · 40 / 200 XP"). Purely additive fields on the EXISTING
+  // `levelup` kind; a client that ignores them behaves exactly as before, and
+  // the SYSTEMS path (which owns the real curve) still absorbs this one.
+  const q = game.players.get(playerId)?.quests;
+  const payload: Record<string, unknown> = {
+    playerId,
+    level: e.level,
+    prevLevel: e.level - 1,
+  };
+  if (q) {
+    payload['xpLeft'] = q.xp;
+    payload['xpForNext'] = xpForNextLevel(e.level);
+  }
+  return { kind: 'levelup', payload };
 }
 
 /**

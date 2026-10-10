@@ -4,6 +4,47 @@
 // Authoritative progress arrives as `quest-progress` / `quest-complete`
 // events; `mob-die` + `xp-gain` feed a local fallback so the tracker still
 // moves when those events race or drop.
+//
+// SCOPE: this tracker is the MAREN CHAIN panel — the five quests Elder Maren
+// offers at the shrine. It deliberately knows nothing about the onboarding
+// spine (the six `tut-*` objectives and the four `road-*` ladder steps): those
+// are surfaced separately and always-on by the objective tracker in
+// `onboarding.ts` / `panels.ts`, which is the thing that answers "what do I
+// do next". Keeping the two apart means a returning player's Maren list is
+// never overwritten by a tutorial, and a new player's chain list is never
+// used as their to-do list. `QUEST_PLAY_ORDER` below is the shared spine both
+// views read for stage numbers.
+
+import type { TrackId } from './onboarding.js';
+
+/**
+ * Canonical play order across every auto-advancing quest family — mirrors
+ * `QUEST_ROADMAP` / `onboardingRoadmap()` on the server. Presentation order
+ * only; it never gates accrual, so nothing here can make a quest
+ * unreachable.
+ */
+export const QUEST_PLAY_ORDER: Array<{ stage: number; track: TrackId; title: string; ids: string[] }> = [
+  { stage: 1, track: 'tutorial', title: 'FIRST FIVE MINUTES', ids: ['tut-first-steps', 'tut-first-blow', 'tut-finisher', 'tut-first-loot', 'tut-don-a-mask', 'tut-signature'] },
+  { stage: 2, track: 'road', title: "WAYFARER'S ROAD", ids: ['road-first-blood', 'road-pickups', 'road-hunt', 'road-lookout'] },
+  { stage: 3, track: 'trio', title: "WANDERER'S TASKS", ids: ['slay5', 'gather10', 'explorer'] },
+  { stage: 4, track: 'maren', title: 'ELDER MAREN', ids: ['ward-spark', 'ember-road', 'deep-delvers', 'chart-the-fall', 'heart-of-fall'] },
+  { stage: 5, track: 'chapter', title: 'CHAPTER — STATIC', ids: ['static-porchlight', 'static-kiosk', 'static-arcade', 'static-meridian', 'static-exchange'] },
+];
+
+/** Stage number + track title for a quest id, or null when it is not on the spine. */
+export function playOrderStage(questId: string): { stage: number; track: TrackId; title: string } | null {
+  for (const entry of QUEST_PLAY_ORDER) {
+    if (entry.ids.includes(questId)) return { stage: entry.stage, track: entry.track, title: entry.title };
+  }
+  return null;
+}
+
+/** Ids belonging to the onboarding spine (tutorial track + Road ladder). */
+export function isSpineQuestId(questId: string): boolean {
+  const t = questId.startsWith('tut-');
+  const r = questId.startsWith('road-');
+  return t || r;
+}
 
 export interface ChainQuestView {
   id: string;

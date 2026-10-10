@@ -37,6 +37,7 @@
 import { BASE_DMG } from './combat.js';
 import { maskText } from './chat.js';
 import { ITEMS, WEAPONS, itemDef, type ItemDef, type ItemKind, type WeaponDef } from './content.js';
+import { noteMaskEquipped, noteSignatureUsed } from './onboarding.js';
 import {
   MASKS,
   MASK_TALENT_POINTS,
@@ -1550,6 +1551,10 @@ export class GameSession {
     // (the anti-farm latch — re-wearing cannot mint infinite points).
     this.maskBonus.set(playerId, def.perk === 'talent-boon' && !this.boonUsed.has(playerId) ? MASK_TALENT_POINTS : 0);
     this.statsCache.delete(playerId);
+    // ONBOARDING: tutorial step 5 ("wear a mask"). The mask is only wearable
+    // through this method, so observing it here makes the predicate exact —
+    // it fires on the real equip, never on a UI click that was rejected.
+    noteMaskEquipped(playerId, maskId);
     const ev = maskEquippedEvent(playerId, maskId, prev);
     return [
       privateEvent(playerId, 'inventory', this.inventoryPayload(playerId)),
@@ -1653,6 +1658,9 @@ export class GameSession {
     }
     this.sigAt.set(playerId, now);
     const effect = def.signature.effect;
+    // ONBOARDING: tutorial step 6. Latched only on the `ok` path, i.e. after
+    // the 12s cooldown has actually elapsed and the signature really fired.
+    noteSignatureUsed(playerId, def.signature.id);
     return {
       out: [
         privateEvent(playerId, 'signature', { playerId, vocation: voc, signature: def.signature.id, name: def.signature.name, effect: { ...effect } }),
