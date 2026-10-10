@@ -193,6 +193,21 @@ export class HUD {
     setAttr(this.xpBar, 'aria-valuetext', `${level} ${xp}/${next}`);
   }
 
+  /**
+   * PLAYABILITY (spawn protection): shield badge while the 3s window covers
+   * the player. Trivial text suffix on the HP label — no new widget, so the
+   * headless DOM stub renders it as plain text.
+   */
+  setSpawnProtected(active: boolean, msLeft = 0) {
+    try {
+      const base = this.hpText.textContent ?? '';
+      const clean = base.replace(/ · 🛡.*$/, '');
+      this.hpText.textContent = active
+        ? `${clean} · 🛡 ${(msLeft / 1000).toFixed(1)}s`
+        : clean;
+    } catch { /* stub DOM — badge is best-effort */ }
+  }
+
   setInventory(items: string[]) {
     this.items = items.slice(0, 20);
     this.renderInv();

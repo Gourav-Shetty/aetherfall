@@ -1193,16 +1193,17 @@ function tickOnce(): void {
     const c = performance.now();
     // AI-NPC @10Hz (dt=0.1): FSM+BT minions + 2 bosses (SpatialHash+astar).
     // Damage hits sim players (death -> respawn); telegraphs go out as events.
-    const views = [...sim.players.values()].map((p) => ({ id: p.id, x: p.x, y: p.y, hp: p.hp }));
-    for (const e of npcs.tick(0.1, views)) {
+    // PLAYABILITY: views carry spawn protection (Sim.protectedUntil) so the
+    // NPC tick never targets protected players; damagePlayer re-checks it so
+    // a stale event can never punch through the window.
+    const views = [...sim.players.values()].map((p) => ({ id: p.id, x: p.x, y: p.y, hp: p.hp, spawnProtectedUntil: p.protectedUntil ?? 0 }));
+    for (const e of npcs.tick(0.1, views, Date.now())) {
       if (e.kind === 'damage-player') {
         const p = sim.players.get(e.targetId);
         if (!p || p.hp <= 0) continue;
-        p.hp = Math.max(0, p.hp - e.amount);
+        if (!sim.damagePlayer(e.targetId, e.amount, Date.now())) continue;
         if (p.hp <= 0) {
-          p.hp = p.maxHp;
-          p.x = 50;
-          p.y = 50;
+          sim.respawnPlayer(p.id, 50, 50, Date.now());
           broadcast({ t: 'event', kind: 'respawn', payload: { id: p.id } });
         }
       } else if (e.kind === 'telegraph') {

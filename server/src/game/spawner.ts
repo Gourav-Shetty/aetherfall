@@ -18,6 +18,33 @@ export const MOBS_PER_CHUNK = 4;
 export const MOB_NAMES = ['gloomfang', 'ashcrawler', 'thornback', 'mistwisp'] as const;
 
 /**
+ * PLAYABILITY (spawn safety): no hostile spawns within this radius of any
+ * spawn anchor. World spawn is (0,0) (see docs/WORLD.md zone map) and the
+ * shrine respawn is (50,50) (server/src/index.ts death path). Both are
+ * covered so a fresh bot is never boxed in on arrival.
+ */
+export const SPAWN_SAFE_RADIUS = 12;
+export const SPAWN_SAFE_POINTS: ReadonlyArray<{ x: number; y: number }> = [
+  { x: 0, y: 0 },
+  { x: 50, y: 50 },
+];
+
+/** True when (x,y) lies inside a spawn-safe disc (no hostile spawns allowed). */
+export function isSpawnSafeZone(
+  x: number,
+  y: number,
+  radius: number = SPAWN_SAFE_RADIUS,
+  points: ReadonlyArray<{ x: number; y: number }> = SPAWN_SAFE_POINTS,
+): boolean {
+  for (const p of points) {
+    const dx = x - p.x;
+    const dy = y - p.y;
+    if (dx * dx + dy * dy <= radius * radius) return true;
+  }
+  return false;
+}
+
+/**
  * Spatial-index cell size in world units. Player melee reaches MELEE_RANGE
  * (2.2) and aggro pulls at AGGRO_RANGE (12); 8 keeps the candidate fan-out at
  * <=9 cells for a melee query while holding ~2 mobs per cell at MOBS_PER_CHUNK
@@ -195,9 +222,51 @@ export class Spawner {
   }
 
   /**
+   * Nearest DOWNED mob within `range` of (x,y) at `now`, or null.
+   * The melee finish path checks this FIRST so a downed target is never
+   * shadowed by a nearer healthy mob sharing the tile region — without this
+   * the killer can punch a fresh mob while its downed victim recovers (3s)
+   * and stands back up, which reads as "swings do nothing".
+   */
+  nearestDownedWithin(x: number, y: number, range: number, now: number): Mob | null {
+    if (!(range >= 0)) return null;
+    const r2 = range * range;
+    const c0 = Math.floor((x - range) / MOB_CELL_SIZE);
+    const c1 = Math.floor((x + range) / MOB_CELL_SIZE);
+    const r0 = Math.floor((y - range) / MOB_CELL_SIZE);
+    const r1 = Math.floor((y + range) / MOB_CELL_SIZE);
+    let best: Mob | null = null;
+    let bestD2 = r2;
+    for (let cy = r0; cy <= r1; cy++) {
+      for (let cx = c0; cx <= c1; cx++) {
+        const bucket = this.cells.get(`${cx},${cy}`);
+        if (!bucket) continue;
+        for (const m of bucket) {
+          if (!m.alive) continue;
+          if ((m.downedUntil ?? 0) <= now) continue;
+          const dx = m.pos.x - x;
+          const dy = m.pos.y - y;
+          const d2 = dx * dx + dy * dy;
+          if (d2 > r2) continue;
+          if (best === null || d2 < bestD2 || (d2 === bestD2 && m.id < best.id)) {
+            best = m;
+            bestD2 = d2;
+          }
+        }
+      }
+    }
+    return best;
+  }
+
+  /**
    * Spawn one chunk (idempotent). Returns newly spawned mobs.
    * Hash bases can theoretically collide across distant chunks, so ids already
-   * taken are bumped forward (staying inside the spawner namespace). */
+   * taken are bumped forward (staying inside the spawner namespace).
+   *
+   * PLAYABILITY: mobs that would land inside a spawn-safe disc are skipped
+   * (never indexed), so the area around (0,0)/(50,50) stays clear by
+   * construction. Deterministic: the same chunk always yields the same kept
+   * set. */
   spawnChunk(cx: number, cy: number, mobLevel?: number): Mob[] {
     const key = `${cx},${cy}`;
     if (this.spawnedChunks.has(key)) return [];
@@ -207,7 +276,9 @@ export class Spawner {
       chunkSize: this.chunkSize,
       mobLevel,
     });
+    const kept: Mob[] = [];
     for (const m of mobs) {
+      if (isSpawnSafeZone(m.pos.x, m.pos.y)) continue;
       while (this.mobs.has(m.id)) {
         // Linear probe inside [MOB_ID_MIN, MOB_ID_MAX]; wraps safely.
         m.id = m.id >= MOB_ID_MAX ? MOB_ID_MIN : m.id + 1;
@@ -217,8 +288,9 @@ export class Spawner {
       }
       this.mobs.set(m.id, m);
       this.index(m);
+      kept.push(m);
     }
-    return mobs;
+    return kept;
   }
 
   /** Ensure the chunk containing (x,y) plus neighbors are spawned. Returns new mobs. */
@@ -229,6 +301,24 @@ export class Spawner {
     for (let dy = -radius; dy <= radius; dy++) {
       for (let dx = -radius; dx <= radius; dx++) {
         out.push(...this.spawnChunk(ccx + dx, ccy + dy, mobLevel));
+      }
+    }
+    return out;
+  }
+
+  /**
+   * PLAYABILITY: drop any live mob inside a spawn-safe disc (moved there by
+   * knockback/forced moves, or spawned before this guard existed). Returns
+   * removed ids. tickGameplay calls this after ensureAround so the safe discs
+   * stay clear even for long-lived shards.
+   */
+  pruneSpawnSafe(radius: number = SPAWN_SAFE_RADIUS): number[] {
+    const out: number[] = [];
+    for (const m of [...this.mobs.values()]) {
+      if (isSpawnSafeZone(m.pos.x, m.pos.y, radius)) {
+        this.unindex(m);
+        this.mobs.delete(m.id);
+        out.push(m.id);
       }
     }
     return out;

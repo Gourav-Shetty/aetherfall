@@ -145,6 +145,32 @@ export function playerMeleeAttack(
   const range = opts.range ?? MELEE_RANGE;
   const ranged = opts.ranged ?? false;
   const rand = opts.rand ?? Math.random;
+  // FINISH FIRST: a downed victim in finish reach is executed even when a
+  // healthy mob stands nearer. Without this priority the swing can chip a
+  // fresh mob while the downed one recovers (3s) and stands back up — the
+  // "I hit it 10 times and nothing died" report.
+  if (!ranged) {
+    const finishReach = range + (opts.finishBonus ?? 0);
+    const downed = game.spawner.nearestDownedWithin(player.x, player.y, finishReach, now);
+    if (downed && inReachOf(player, downed.pos, finishReach)) {
+      cd.lastAttackAt = now;
+      const fin = game.spawner.finishMob(downed.id, now);
+      if (fin) {
+        const events: GameEvent[] = creditKill(game, player, fin.mob, rand, { finisher: true, bonusRolls: opts.bonusRolls ?? 0 });
+        return {
+          ok: true,
+          mobId: fin.mob.id,
+          mobName: fin.mob.name,
+          dmg: 0,
+          dealt: 0,
+          killed: true,
+          crit: false,
+          finished: true,
+          events,
+        };
+      }
+    }
+  }
   const target = game.spawner.nearestMobWithin(player.x, player.y, range);
   if (!target) return { ok: false, reason: 'no-target', events: empty };
   // The grid query is a superset of the reach circle; confirm exactly.
@@ -649,6 +675,9 @@ export function tickGameplay(game: GameState, now: number): GameEvent[] {
     for (const m of fresh) {
       out.push({ kind: 'mob-spawn', payload: { id: m.id, name: m.name, x: m.pos.x, y: m.pos.y, hp: m.hp, maxHp: m.maxHp } });
     }
+    // PLAYABILITY: keep the spawn discs clear (knockback/legacy saves can
+    // still push a mob inside after spawnChunk filtered it).
+    game.spawner.pruneSpawnSafe();
     // Explorer quest: track distinct chunks beyond spawn.
     const key = chunkKeyOf(p.x, p.y);
     const evts: QuestEvent[] = onExplore(p.quests, p.seenChunks, key);

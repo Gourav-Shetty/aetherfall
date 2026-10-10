@@ -91,7 +91,7 @@ function worldWithMob() {
 function fightToKill(
   game: GameState,
   playerId: number,
-  opts: { startAt?: number; crit?: boolean } = {},
+  opts: { startAt?: number; crit?: boolean; rand?: () => number } = {},
 ): { events: GameEvent[]; swings: number; lastAt: number; killed: boolean; mobId: number | null } {
   const events: GameEvent[] = [];
   let now = opts.startAt ?? 1000;
@@ -99,7 +99,7 @@ function fightToKill(
   let mobId: number | null = null;
   for (let i = 0; i < 200; i++) {
     const r = playerMeleeAttack(game, playerId, now, {
-      rand: alwaysLoot,
+      rand: opts.rand ?? alwaysLoot,
       ...(opts.crit !== undefined ? { crit: opts.crit } : {}),
     });
     if (r.ok) {
@@ -456,7 +456,16 @@ describe('melee: event payload shape is protocol-v1 safe', () => {
     const { game, inReach } = worldWithMob();
     const target = inReach[0]!;
     setPlayerPos(game, 1, target.pos.x, target.pos.y);
-    const { events } = fightToKill(game, 1);
+    // `alwaysLoot` is a single module-level stream shared by every test in this
+    // file, so where it sits when this test runs depends on execution order.
+    // `pickup-spawn` is a CHANCE roll (`rand() < d.chance` in
+    // rollLootForKill), so an arbitrary stream position makes this assertion
+    // a coin flip: it passed until a balance tweak shifted the number of
+    // draws taken before it. Fight with `() => 0` instead — every drop entry
+    // passes its gate, so the assertion tests the kill PATH (which is what
+    // this suite regressed on) instead of the seed's luck.
+    const guaranteedDrop = () => 0;
+    const { events } = fightToKill(game, 1, { rand: guaranteedDrop });
     const seen = new Set(kindsOf(events));
     for (const required of ['mob-die', 'xp-gain', 'pickup-spawn']) {
       assert.equal(seen.has(required), true, `${required} fired`);

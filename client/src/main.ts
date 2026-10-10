@@ -17,7 +17,7 @@ import { SettingsStore, qualityCaps } from './settings.js';
 import { Joystick, blendMove } from './joystick.js';
 import { FOG_RADIUS, FogOfWar, fogChunkKey, installFogPersistence } from './fog.js';
 import { ChainTracker } from './quests.js';
-import { bossBars } from './bosses.js';
+import { bossBars, relevantBossBars } from './bosses.js';
 // SYSTEMS-HOOK (systems integration): additive panels over the server's composed
 // systems events (party / emotes / vendor / talents). Nothing existing is
 // replaced; see docs/SYSTEMS.md#Integration for the chat-command reference.
@@ -1325,7 +1325,12 @@ function frame(now: number) {
   }
   if (now - lastBoss > 200) {
     lastBoss = now;
-    hud.setBosses(bossBars(list));
+    // PLAYABILITY: gate bars to the nearest boss within 30u (or a boss
+    // targeting the player — reserved via the targeting set, currently empty
+    // on the v1 wire, so far full-HP bosses stay hidden). bossBars() stays as
+    // the ungated helper for tests/legacy callers.
+    void bossBars;
+    hud.setBosses(relevantBossBars(list, pred.pos.x, pred.pos.y));
   }
   if (lbVisible && now - lastLb > 1000) {
     lastLb = now;

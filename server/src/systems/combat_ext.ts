@@ -61,9 +61,9 @@ export type Resistances = Partial<Record<DamageType, number>>;
  * take bonus holy, bosses split the difference.
  */
 export const MOB_RESISTANCES: Record<string, Resistances> = {
-  gloomfang: { physical: 0.1, fire: 0, holy: -0.1 },
-  mistwisp: { physical: 0.25, fire: 0.25, holy: 0 },
-  thornback: { physical: 0.3, fire: -0.1, holy: 0 },
+  gloomfang: { physical: 0.05, fire: 0, holy: -0.1 },
+  mistwisp: { physical: 0.15, fire: 0.25, holy: 0 },
+  thornback: { physical: 0.2, fire: -0.1, holy: 0 },
   'meadow-sprite': { physical: 0, fire: 0.4, holy: -0.15 },
   ashcrawler: { physical: 0.2, fire: 0.3, holy: 0 },
   'hollow-knight': { physical: 0.35, fire: 0, holy: 0.15 },

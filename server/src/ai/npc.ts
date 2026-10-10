@@ -52,6 +52,12 @@ export interface PlayerView {
    */
   vx?: number;
   vy?: number;
+  /**
+   * PLAYABILITY (spawn protection): ms timestamp until which this player
+   * takes no damage (Sim.protectedUntil). Protected players are never
+   * targeted and never take pool/boss/minion damage while it covers nowMs.
+   */
+  spawnProtectedUntil?: number;
 }
 
 export type NPCKind = 'gloomfang' | 'crypt-husk';
@@ -233,8 +239,21 @@ const CELL = 2; // path grid resolution (world units per cell)
 const GRID_N = Math.ceil(WORLD / CELL); // 50x50
 const ATTACK_RANGE = 1.8;
 const AGGRO_RANGE = 14;
-const MELEE_DAMAGE = 8;
-const MELEE_COOLDOWN = 1.0;
+/**
+ * PLAYABILITY (difficulty sanity): a single minion hit deals 7 in the
+ * required 6-14 band, one swing every 1.5s. TTD for a naked 100HP idle
+ * player is therefore (ceil(100/7)-1)*1.5 = 21s (>20s required), while TTK
+ * for the player is untouched (12 + 3/lvl, 3-5 swings — see docs/GAMEPLAY.md).
+ */
+export const MELEE_DAMAGE = 7;
+export const MELEE_COOLDOWN = 1.5;
+/**
+ * PLAYABILITY (leash): a minion that has been kited this far from its patrol
+ * anchor drops its target and walks home. Without this a chase can be dragged
+ * to spawn and camp new players; with it the 35u FSM loss range is never the
+ * limiter near home.
+ */
+export const LEASH_RANGE = 20;
 
 // --- Hotline Miami senses (see vision.ts + docs/AI.md) ------------------------
 // SURRENDER_CHANCE: solo mobs at/below SURRENDER_HP_FRAC roll once per life.
@@ -705,7 +724,7 @@ export class NPCManager {
       ev.push(...this.pending);
       this.pending.length = 0;
     }
-    const targets = players.filter((p) => p.hp > 0);
+    const targets = players.filter((p) => p.hp > 0 && (p.spawnProtectedUntil ?? 0) <= nowMs);
 
     this.updateBossSpawns(dt, targets, ev, nowMs);
 
@@ -783,6 +802,8 @@ export class NPCManager {
       for (const id of ids) {
         const p = byId.get(id);
         if (!p || p.hp <= 0) continue;
+        // PLAYABILITY: spawn-protected players are untargetable (no aggro).
+        if ((p.spawnProtectedUntil ?? 0) > nowMs) continue;
         const d = Math.hypot(p.x - m.x, p.y - m.y);
         if (d >= bd || d > range) continue;
         const q = {
@@ -798,6 +819,21 @@ export class NPCManager {
       const visible = target !== null;
       const distT = target ? bd : Infinity;
       if (target) m.lastSeen = { x: target.x, y: target.y };
+
+      // PLAYABILITY (leash): kited past LEASH_RANGE from the patrol anchor,
+      // drop the target — the FSM below falls back to patrol and walks home
+      // instead of camping spawn. Checked every tick so the return starts at
+      // once rather than after the 6s search sweep.
+      const home = m.patrol[0] ?? { x: m.x, y: m.y };
+      const leashed = Math.hypot(m.x - home.x, m.y - home.y) > LEASH_RANGE;
+      let effVisible = visible;
+      let effDistT = distT;
+      let effTarget: PlayerView | null = target;
+      if (leashed) {
+        effVisible = false;
+        effDistT = Infinity;
+        effTarget = null;
+      }
 
       // Noise: calm minions within earshot turn toward the shot.
       let heardNoise = false;
@@ -832,21 +868,32 @@ export class NPCManager {
       // BT action selection
       m.bb.set('hp', m.hp);
       m.bb.set('maxHp', m.maxHp);
-      m.bb.set('dist', visible ? distT : Infinity);
+      m.bb.set('dist', effVisible ? effDistT : Infinity);
       m.bb.set('attackRange', ATTACK_RANGE);
       m.bb.set('aggroRange', range);
-      m.bb.set('visible', visible);
+      m.bb.set('visible', effVisible);
       m.bt.reset();
       m.bt.tick(m.bb);
 
       // FSM locomotion state (authoritative for movement/death)
       const prev = m.fsm.state;
-      const st = m.fsm.update(dt, {
+      let st = m.fsm.update(dt, {
         hp: m.hp, maxHp: m.maxHp,
-        targetVisible: visible, distToTarget: visible ? distT : Infinity,
+        targetVisible: effVisible, distToTarget: effVisible ? effDistT : Infinity,
         attackRange: ATTACK_RANGE, aggroRange: range, fleeThreshold: 0.25,
         heardNoise, wantSurrender, wasAttacked: m.hitWhileSurrendered,
       });
+      // Leashed minions skip the 6s search sweep and walk straight home: the
+      // FSM above routes chase->search on lost sight, which would comb a
+      // far-off lastSeen instead of the anchor.
+      if (leashed && (st === 'chase' || st === 'attack' || st === 'search')) {
+        m.fsm.force('patrol');
+        st = 'patrol';
+        m.lastSeen = null;
+        m.searchPts = [];
+        m.searchIdx = 0;
+        m.taunted = false;
+      }
 
       // Entering surrender: hands-up event, hold still.
       if (prev !== 'surrender' && st === 'surrender') {
@@ -864,9 +911,9 @@ export class NPCManager {
       // TAUNT on first acquisition: calm -> ALERT with a target in sight.
       const wasAlert = prev === 'chase' || prev === 'attack';
       const nowAlert = st === 'chase' || st === 'attack';
-      if (!wasAlert && nowAlert && target && !m.taunted) {
+      if (!wasAlert && nowAlert && effTarget && !m.taunted) {
         m.taunted = true;
-        m.facing = faceToward(m.x, m.y, target.x, target.y);
+        m.facing = faceToward(m.x, m.y, effTarget.x, effTarget.y);
         ev.push({
           kind: 'emote', fromId: m.id, name: m.name,
           emote: 'laugh', label: 'Taunt', x: m.x, y: m.y,
@@ -891,11 +938,11 @@ export class NPCManager {
 
       if (st === 'surrender') {
         // Hands up, stands still (tracks the threat with its stare).
-        if (target) m.facing = faceToward(m.x, m.y, target.x, target.y);
+        if (effTarget) m.facing = faceToward(m.x, m.y, effTarget.x, effTarget.y);
       } else if (st === 'suspicious') {
         // Stare toward the noise for 1.5s (the FSM stands down to patrol).
         if (m.noiseAt) m.facing = faceToward(m.x, m.y, m.noiseAt.x, m.noiseAt.y);
-        else if (target) m.facing = faceToward(m.x, m.y, target.x, target.y);
+        else if (effTarget) m.facing = faceToward(m.x, m.y, effTarget.x, effTarget.y);
       } else if (st === 'search') {
         // Sweep last-seen + neighbors; the 6s timer returns to patrol and
         // vision re-acquires through the tracking leg while sweeping.
@@ -909,17 +956,17 @@ export class NPCManager {
           }
         }
       } else if (st === 'flee' || act === 'flee') {
-        if (target) this.moveAway(m, target, 3.2, dt);
+        if (effTarget) this.moveAway(m, effTarget, 3.2, dt);
       } else if (st === 'attack' || act === 'attack') {
-        if (target) m.facing = faceToward(m.x, m.y, target.x, target.y);
-        if (target && distT <= ATTACK_RANGE + 0.4 && m.attackCd <= 0) {
+        if (effTarget) m.facing = faceToward(m.x, m.y, effTarget.x, effTarget.y);
+        if (effTarget && effDistT <= ATTACK_RANGE + 0.4 && m.attackCd <= 0) {
           m.attackCd = MELEE_COOLDOWN;
-          ev.push({ kind: 'damage-player', targetId: target.id, amount: MELEE_DAMAGE, fromId: m.id });
-        } else if (target) {
-          this.moveAlongPath(m, target.x, target.y, 3.5, dt);
+          ev.push({ kind: 'damage-player', targetId: effTarget.id, amount: MELEE_DAMAGE, fromId: m.id });
+        } else if (effTarget) {
+          this.moveAlongPath(m, effTarget.x, effTarget.y, 3.5, dt);
         }
       } else if (st === 'chase' || act === 'chase') {
-        if (target) this.moveAlongPath(m, target.x, target.y, 3.5, dt);
+        if (effTarget) this.moveAlongPath(m, effTarget.x, effTarget.y, 3.5, dt);
       } else {
         // idle / patrol
         const wp = m.patrol[m.patrolIdx];

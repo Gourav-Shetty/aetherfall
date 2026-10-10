@@ -20,6 +20,11 @@ Mobs are mirrored as engine entities with `pos` + `mob` components.
 | Combat    | `MAX_HP` (mobs +20/lvl)          | 100          |
 | Combat    | `RESPAWN_DELAY_MS`               | 5000 ms      |
 | Combat    | `AGGRO_RANGE` / `DEAGGRO_RANGE`  | 12 / 20      |
+| Combat    | `MELEE_DAMAGE` (minion hit)      | 7            |
+| Combat    | `MELEE_COOLDOWN` (minion swing)  | 1500 ms      |
+| Combat    | `LEASH_RANGE` (minion give-up)  | 20 units     |
+| Spawner   | `SPAWN_SAFE_RADIUS` (no mobs)    | 12 units     |
+| Sim       | `SPAWN_PROTECTION_MS`            | 3000 ms      |
 | Inventory | `MAX_SLOTS` / `MAX_STACK`        | 20 / 99      |
 | Inventory | pickup radius                    | 2.5 units    |
 | Quests    | `slay5` kill 5 mobs → +60 XP     |              |
@@ -29,6 +34,36 @@ Mobs are mirrored as engine entities with `pos` + `mob` components.
 | Chat      | `CHAT_RATE_LIMIT_MS` / max len   | 1000 ms / 200 |
 | Spawner   | `MOBS_PER_CHUNK`                 | 4            |
 | Guilds    | max name / max members           | 24 chars / 50 |
+
+### Spawn safety
+
+A fresh login must not land inside a mob pile, and the first ten seconds must
+not end in a death screen with no warning. Three rules enforce that:
+
+- **No hostile spawns in the safe discs.** `spawnChunk` skips any mob inside
+  `SPAWN_SAFE_RADIUS` (12u) of a spawn anchor — world spawn `(0,0)` and the
+  shrine `(50,50)` — so the clear zone holds by construction.
+  `pruneSpawnSafe()` runs each tick as a backstop for knockback or legacy
+  saves that pushed a mob back inside.
+- **3s of spawn protection** (`SPAWN_PROTECTION_MS`) on join and on respawn.
+  Protected players are filtered out of the NPC targeting set *and* re-checked
+  inside `Sim.damagePlayer`, so a stale AI event cannot punch through it. The
+  HUD shows a `🛡` badge with the remaining time.
+- **Leash.** A minion kited more than `LEASH_RANGE` (20u) from its patrol
+  anchor drops its target and walks home. Without it a chase could be dragged
+  back to spawn and camped on new players.
+
+### Damage budget
+
+A single minion hit deals **7** every **1.5s**, inside the 6–14 band that keeps
+a hit from feeling trivial without being lethal. Time-to-die for a naked
+100 HP level-1 player standing still against one minion is
+`ceil(100/7) - 1 = 13` hits ≈ **21s**, so an idle player always gets a chance to
+react. The player's side is unchanged: 12 + 3/lvl keeps mob TTK at 3–5 swings.
+
+Physical resistances on the three starter mobs were trimmed (`gloomfang`
+0.10 → 0.05, `mistwisp` 0.25 → 0.15, `thornback` 0.30 → 0.20) so the early
+fight does not stall against per-type mitigation.
 
 ## Systems
 

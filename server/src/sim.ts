@@ -23,7 +23,16 @@ export type SimPlayer = {
   seq: number;
   /** TERRAIN: `heightAt()` of the tile under the body (0 = sea level). */
   z: number;
+  /**
+   * PLAYABILITY (spawn protection): ms timestamp until which the player takes
+   * no damage (3s from join/respawn). NPC/boss damage lanes check this via
+   * isSpawnProtected(); the HUD shows a shield badge while it covers now.
+   */
+  protectedUntil: number;
 };
+
+/** ms of spawn protection granted on join and on shrine respawn. */
+export const SPAWN_PROTECTION_MS = 3000;
 
 /** Extension point for gameplay systems (combat, AI, pickups...). Runs pre/post integrate. */
 export type SimSystemHook = (sim: Sim, dt: number) => void;
@@ -114,11 +123,12 @@ export class Sim {
     else this.postSystems.push(hook);
   }
 
-  addPlayer(id: number, name: string, x?: number, y?: number): SimPlayer {
+  addPlayer(id: number, name: string, x?: number, y?: number, nowMs: number = Date.now()): SimPlayer {
     const px = x ?? 10 + (id * 7) % 80;
     const py = y ?? 10 + (id * 13) % 80;
     const spawn = this.findFreeSpawn(px, py);
-    const p: SimPlayer = { id, name, x: spawn.x, y: spawn.y, vx: 0, vy: 0, hp: 100, maxHp: 100, seq: 0, z: 0 };
+    // PLAYABILITY: spawn at full HP with 3s of protection (see protectedUntil).
+    const p: SimPlayer = { id, name, x: spawn.x, y: spawn.y, vx: 0, vy: 0, hp: 100, maxHp: 100, seq: 0, z: 0, protectedUntil: nowMs + SPAWN_PROTECTION_MS };
     // TERRAIN: publish z before the first snapshot so a client that joins
     // mid-tick never sees a player at sea level standing on a hill.
     if (this.terrain !== null) p.z = this.terrain.zAt(p.x, p.y);
@@ -149,6 +159,54 @@ export class Sim {
   getPos(id: number): { x: number; y: number } | undefined {
     const p = this.players.get(id);
     return p ? { x: p.x, y: p.y } : undefined;
+  }
+
+  /** True while spawn protection still covers `nowMs` (no damage taken). */
+  isSpawnProtected(id: number, nowMs: number = Date.now()): boolean {
+    const p = this.players.get(id);
+    return !!p && (p.protectedUntil ?? 0) > nowMs;
+  }
+
+  /** ms of spawn protection left (0 when expired). The HUD badge reads this. */
+  spawnProtectionLeft(id: number, nowMs: number = Date.now()): number {
+    const p = this.players.get(id);
+    if (!p) return 0;
+    return Math.max(0, (p.protectedUntil ?? 0) - nowMs);
+  }
+
+  /**
+   * Authoritative damage entry point that honors spawn protection.
+   * Returns false when protected (no HP removed) or the player is unknown.
+   */
+  damagePlayer(id: number, amount: number, nowMs: number = Date.now()): boolean {
+    const p = this.players.get(id);
+    if (!p || amount <= 0) return false;
+    if ((p.protectedUntil ?? 0) > nowMs) return false;
+    p.hp = Math.max(0, p.hp - amount);
+    return true;
+  }
+
+  /**
+   * Respawn at full HP with fresh protection (shrine anchor 50,50 by default).
+   * Server death path calls this instead of mutating hp/pos inline so the
+   * protection window can never be forgotten on one of the two paths.
+   */
+  respawnPlayer(id: number, x = 50, y = 50, nowMs: number = Date.now()): boolean {
+    const p = this.players.get(id);
+    if (!p) return false;
+    p.hp = p.maxHp;
+    p.x = x;
+    p.y = y;
+    p.vx = 0;
+    p.vy = 0;
+    p.protectedUntil = nowMs + SPAWN_PROTECTION_MS;
+    const eid = this.entityByPlayer.get(id);
+    if (eid !== undefined) {
+      this.world.set(eid, 'pos', { x: p.x, y: p.y });
+      this.world.set(eid, 'vel', { x: 0, y: 0 });
+    }
+    this.rebuildSpatial();
+    return true;
   }
 
   /** Install the authoritative wall set (POST /walls + boot load path). */
