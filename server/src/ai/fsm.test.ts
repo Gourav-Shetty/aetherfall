@@ -30,17 +30,17 @@ describe('fsm transitions', () => {
     assert.equal(nextState('patrol', seen(1.5)), 'attack');
   });
 
-  it('chase -> attack in range, -> patrol when target lost', () => {
+  it('chase -> attack in range, -> search when target lost', () => {
     assert.equal(nextState('chase', seen(1.2)), 'attack');
-    assert.equal(nextState('chase', { ...base }), 'patrol'); // no target
-    assert.equal(nextState('chase', seen(40)), 'patrol'); // beyond leash
+    assert.equal(nextState('chase', { ...base }), 'search'); // no target
+    assert.equal(nextState('chase', seen(40)), 'search'); // beyond leash
     assert.equal(nextState('chase', seen(8)), 'chase'); // closing
   });
 
   it('attack sticks until target clearly escapes', () => {
     assert.equal(nextState('attack', seen(2.0)), 'attack');
     assert.equal(nextState('attack', seen(8)), 'chase');
-    assert.equal(nextState('attack', { ...base }), 'patrol');
+    assert.equal(nextState('attack', { ...base }), 'search');
   });
 
   it('low hp flees under threat, recovers when safe', () => {

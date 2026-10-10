@@ -6,9 +6,21 @@
 
 import { SpatialHash, astar } from '@aetherfall/engine';
 import type { EntitySnapshot } from '@aetherfall/shared';
+import { mulberry32 } from '@aetherfall/shared';
 import { NPC_ID_MAX, NPC_ID_MIN } from '../game/mobs.js';
 import type { BossName } from '../game/content.js';
-import { NPCFSM } from './fsm.js';
+import {
+  DOWNED_DURATION_MS,
+  DOWNED_RECOVER_FRAC,
+} from '../systems/combat_ext.js';
+import { NPCFSM, type NPCState } from './fsm.js';
+import {
+  NOISE_RADIUS,
+  canDetect,
+  canTrack,
+  faceToward,
+  visionRangeAt,
+} from './vision.js';
 import {
   Blackboard,
   action,
@@ -33,6 +45,13 @@ export interface PlayerView {
   x: number;
   y: number;
   hp: number;
+  /**
+   * Authoritative velocity (u/s) when the caller provides it. Otherwise the
+   * manager derives speed from per-tick position deltas for the
+   * moving-or-close leg of vision (see vision.ts).
+   */
+  vx?: number;
+  vy?: number;
 }
 
 export type NPCKind = 'gloomfang' | 'crypt-husk';
@@ -61,8 +80,79 @@ export interface NpcBossKillEvent {
   x: number;
   y: number;
   killedBy: number;
+  /** True when the kill was a melee finisher on a downed boss (bonus XP path). */
+  finisher?: boolean;
 }
-export type NpcEvent = NpcDamageEvent | NpcTelegraphEvent | NpcBossKillEvent;
+/**
+ * DOWNED: a minion/boss reduced to 0 HP crawls instead of dying. Clients
+ * render the crawl state off this event; a follow-up melee swing finishes it.
+ * Unknown kinds are ignored by old clients, so this is wire-safe.
+ */
+export interface NpcDownedEvent {
+  kind: 'mob-downed';
+  id: number;
+  name: string;
+  x: number;
+  y: number;
+  downedUntil: number;
+}
+/** An unanswered knockdown stood back up at partial HP. */
+export interface NpcUpEvent {
+  kind: 'mob-up';
+  id: number;
+}
+/** A thrown sidearm stunned a minion/boss (no actions until `until`). */
+export interface NpcStunEvent {
+  kind: 'mob-stun';
+  id: number;
+  until: number;
+}
+/** A downed minion was finished in melee (instant kill, credited). */
+export interface NpcFinishEvent {
+  kind: 'mob-die';
+  id: number;
+  killedBy: number;
+  finisher: true;
+}
+/**
+ * TAUNT: a minion acquiring a target plays an emote bubble. `emote` reuses
+ * the existing `laugh` id so the composed-systems client renders it through
+ * the normal emote broadcast (`{t:'event',kind:'emote',payload}` — the same
+ * lane index.ts already forwards for every other NPC event kind).
+ */
+export interface NpcEmoteEvent {
+  kind: 'emote';
+  fromId: number;
+  name: string;
+  emote: 'laugh';
+  label: string;
+  x: number;
+  y: number;
+  expiresAt: number;
+  seq: number;
+}
+/**
+ * SURRENDER: a solo low-HP mob threw up its hands. Clients render the
+ * hands-up state off this event (the mob stands still server-side);
+ * unknown kinds are ignored by old clients, so this is wire-safe.
+ */
+export interface NpcSurrenderEvent {
+  kind: 'surrender';
+  id: number;
+  name: string;
+  x: number;
+  y: number;
+}
+export type NpcEvent =
+  | NpcDamageEvent
+  | NpcTelegraphEvent
+  | NpcBossKillEvent
+  | NpcEmoteEvent
+  | NpcSurrenderEvent
+  | NpcDownedEvent
+  | NpcUpEvent
+  | NpcStunEvent
+  | NpcFinishEvent;
 
 /** Lingering Wyrm fire: burns `tickDamage` once per POOL_TICK_SEC per player. */
 interface FirePool {
@@ -90,6 +180,10 @@ interface BossEntry {
   deadT: number;
   /** Player id credited with the most recent hit (boss-kill payout). */
   lastHitBy: number;
+  /** ms timestamp until which the boss is downed (crawls); 0 = up. */
+  downedUntil: number;
+  /** ms timestamp until which the boss is stunned (no actions); 0 = free. */
+  stunUntil: number;
 }
 
 interface Minion {
@@ -109,6 +203,29 @@ interface Minion {
   repathT: number;
   attackCd: number;
   deadT: number;
+  /** Vision cone facing (radians, 0 = +X). Updated on every move/attack. */
+  facing: number;
+  /** Last known target position (search sweep anchor). */
+  lastSeen: { x: number; y: number } | null;
+  /** Search sweep: last-seen + 2 neighbors, visited in order. */
+  searchPts: Array<{ x: number; y: number }>;
+  searchIdx: number;
+  /** Noise position this suspicious episode stares at (null = none). */
+  noiseAt: { x: number; y: number } | null;
+  /** True while ALERT on the current target episode (gates the TAUNT). */
+  taunted: boolean;
+  /** True once the 40% surrender roll resolved this life (win or lose). */
+  surrenderRolled: boolean;
+  /** True once a surrender broke (attacked) — never re-roll this life. */
+  surrenderBroken: boolean;
+  /** True when hit while surrendered (exits to re-aggro via the FSM). */
+  hitWhileSurrendered: boolean;
+  /** Per-minion deterministic stream (id-seeded) for the surrender roll. */
+  rng: () => number;
+  /** ms timestamp until which the minion is downed (crawls); 0 = up. */
+  downedUntil: number;
+  /** ms timestamp until which the minion is stunned (no actions); 0 = free. */
+  stunUntil: number;
 }
 
 const WORLD = 100; // arena bounds (matches server index.ts)
@@ -118,6 +235,48 @@ const ATTACK_RANGE = 1.8;
 const AGGRO_RANGE = 14;
 const MELEE_DAMAGE = 8;
 const MELEE_COOLDOWN = 1.0;
+
+// --- Hotline Miami senses (see vision.ts + docs/AI.md) ------------------------
+// SURRENDER_CHANCE: solo mobs at/below SURRENDER_HP_FRAC roll once per life.
+// ALLY_RADIUS: another living minion inside this radius means "not solo".
+// SEARCH_OFFSET: neighbor spacing for the last-seen + 2 sweep.
+// SEARCH_SPEED: sweep pace (slower than the 3.5 chase, faster than patrol).
+const SURRENDER_HP_FRAC = 0.25;
+const SURRENDER_CHANCE = 0.4;
+const ALLY_RADIUS = 10;
+const SEARCH_OFFSET = 3;
+const SEARCH_SPEED = 2.0;
+/** Cap on noise events remembered between 10Hz ticks (attacks are loud). */
+const MAX_NOISES = 16;
+
+/**
+ * Pure surrender gate: solo (no allies nearby) + at/below 25% HP + wins the
+ * 40% roll. `roll` is caller RNG in [0, 1) — pass a seeded stream in tests.
+ */
+export function shouldSurrender(
+  hp: number,
+  maxHp: number,
+  alliesNearby: boolean,
+  roll: number,
+): boolean {
+  if (alliesNearby) return false;
+  if (maxHp <= 0) return false;
+  if (hp / maxHp > SURRENDER_HP_FRAC) return false;
+  return roll < SURRENDER_CHANCE;
+}
+
+/** Observable minion state for tests/debug (copies, safe to retain). */
+export interface MinionDebug {
+  id: number;
+  x: number;
+  y: number;
+  hp: number;
+  maxHp: number;
+  state: NPCState;
+  facing: number;
+  lastSeen: { x: number; y: number } | null;
+  searchPts: Array<{ x: number; y: number }>;
+}
 
 // --- boss spawn rules (see docs/WORLD.md) -----------------------------------
 /** A living player this close to a boss anchor wakes it. */
@@ -208,6 +367,16 @@ export class NPCManager {
   private hash = new SpatialHash();
   /** Open arena with walled border; shared by all astar queries. */
   private grid: number[][];
+  /** Authoritative walls.json rects for the LoS leg (empty = open arena). */
+  private walls: Array<{ x: number; y: number; w: number; h: number }> = [];
+  /** Noises queued since the last tick (attacks via damageFromPlayer + notifyNoise). */
+  private noises: Array<{ x: number; y: number }> = [];
+  /** Downed/finish/stun events queued by damageFromPlayer, drained by tick(). */
+  private pending: NpcEvent[] = [];
+  /** Last-tick player positions for the moving-or-close leg of vision. */
+  private lastPos = new Map<number, { x: number; y: number }>();
+  /** Emote seq counter for TAUNT bubbles (client EmoteStore identity). */
+  private emoteSeq = 1;
 
   constructor() {
     this.grid = [];
@@ -258,6 +427,8 @@ export class NPCManager {
       dormant: wakeRange !== Infinity,
       deadT: 0,
       lastHitBy: 0,
+      downedUntil: 0,
+      stunUntil: 0,
     };
   }
 
@@ -269,6 +440,8 @@ export class NPCManager {
     b.ctl.phase = 'chase';
     b.deadT = 0;
     b.lastHitBy = 0;
+    b.downedUntil = 0;
+    b.stunUntil = 0;
   }
 
   // ------------------------------------------------------------- spawning
@@ -306,6 +479,9 @@ export class NPCManager {
     const bb = new Blackboard();
     // Deterministic stagger (was Math.random): derived from id so sims stay reproducible.
     const stagger = ((Math.imul(id, 2654435761) >>> 0) % 1000) / 1000;
+    // Initial facing: toward the second patrol waypoint (first is home).
+    const wp1 = patrol[1] ?? patrol[0];
+    const facing = wp1 ? Math.atan2(wp1.y - y, wp1.x - x) : 0;
     const m: Minion = {
       id, kind, name, x, y,
       hp: maxHp, maxHp,
@@ -314,6 +490,13 @@ export class NPCManager {
       bb,
       patrol, patrolIdx: 0, path: [], repathT: stagger * 0.5,
       attackCd: 0, deadT: 0,
+      facing,
+      lastSeen: null, searchPts: [], searchIdx: 0, noiseAt: null,
+      taunted: false, surrenderRolled: false, surrenderBroken: false,
+      hitWhileSurrendered: false,
+      rng: mulberry32((Math.imul(id, 2654435761) ^ 0x9e3779b9) >>> 0),
+      downedUntil: 0,
+      stunUntil: 0,
     };
     this.minions.set(id, m);
     return id;
@@ -354,33 +537,148 @@ export class NPCManager {
 
   // ------------------------------------------------------------- combat io
   /**
+   * Install the authoritative walls.json rects for the LoS leg of vision
+   * (mirrors what sim.setWalls() holds). Empty by default (open arena).
+   */
+  setWalls(walls: Array<{ x: number; y: number; w: number; h: number }>): void {
+    this.walls = walls.map((w) => ({ ...w }));
+  }
+
+  /**
+   * Queue a heard noise (gunshots, explosions, other loud systems).
+   * Patrol/idle minions within NOISE_RADIUS turn toward it (SUSPICIOUS).
+   * Player melee attacks queue automatically via damageFromPlayer.
+   */
+  notifyNoise(x: number, y: number): void {
+    this.noises.push({ x, y });
+    if (this.noises.length > MAX_NOISES) this.noises.splice(0, this.noises.length - MAX_NOISES);
+  }
+
+  /** Observable minion state for tests/debug (copies, safe to retain). */
+  debugMinion(id: number): MinionDebug | undefined {
+    const m = this.minions.get(id);
+    if (!m) return undefined;
+    return {
+      id: m.id, x: m.x, y: m.y, hp: m.hp, maxHp: m.maxHp,
+      state: m.fsm.state, facing: m.facing,
+      lastSeen: m.lastSeen ? { ...m.lastSeen } : null,
+      searchPts: m.searchPts.map((p) => ({ ...p })),
+    };
+  }
+
+  /** Living minion ids (spawn order) — tests use this to find subjects. */
+  minionIds(): number[] {
+    return [...this.minions.keys()];
+  }
+
+  /**
    * Player basic attack: nearest NPC within 3u takes `amount` dmg. Returns the
    * hit id or -1. `attackerId` credits the hit (boss-kill payout). Boss hits go
    * through damageBoss() so the Warden's shield actually blocks them.
+   *
+   * Lethal hits knock the target DOWNED (3s crawl) instead of killing it; a
+   * follow-up melee swing on the downed target finishes it (minions emit
+   * `mob-die`, bosses emit `boss-kill` on the next tick). Ranged swings
+   * (`opts.ranged`) knock down but NEVER finish — they return -1 on a downed
+   * target, so the killer must walk up. Pass `opts.now` in tests for a
+   * deterministic clock (defaults to Date.now()).
+   *
+   * Every swing is loud: the attack position is queued as noise (even on a
+   * miss), so nearby patrols turn toward gunfire/melee within NOISE_RADIUS.
+   * Hitting a surrendered mob breaks the surrender (it still takes damage).
    */
-  damageFromPlayer(x: number, y: number, amount = 12, attackerId = 0): number {
+  damageFromPlayer(
+    x: number,
+    y: number,
+    amount = 12,
+    attackerId = 0,
+    opts: { ranged?: boolean; now?: number } = {},
+  ): number {
+    this.notifyNoise(x, y);
+    const now = opts.now ?? Date.now();
+    const ranged = opts.ranged ?? false;
     let best = -1;
     let bd = 3.0;
     for (const m of this.minions.values()) {
-      if (m.hp <= 0) continue;
+      // Downed minions (0 HP, crawl timer running) stay targetable so a melee
+      // swing can finish them; true corpses are skipped.
+      if (m.hp <= 0 && m.downedUntil <= now) continue;
       const d = Math.hypot(m.x - x, m.y - y);
       if (d < bd) { bd = d; best = m.id; }
     }
     for (const b of this.bosses) {
-      if (b.dormant || b.ctl.dead) continue;
+      if (b.dormant) continue;
+      if (b.ctl.dead && b.downedUntil <= now) continue;
       const d = Math.hypot(b.ctl.x - x, b.ctl.y - y);
       if (d < bd) { bd = d; best = b.id; }
     }
     if (best < 0) return -1;
     const m = this.minions.get(best);
     if (m) {
+      // FINISH branch: melee only, on a downed minion.
+      if (m.downedUntil > now) {
+        if (ranged) return -1;
+        m.downedUntil = 0;
+        m.stunUntil = 0;
+        this.pending.push({ kind: 'mob-die', id: m.id, killedBy: attackerId, finisher: true });
+        if (m.fsm.state === 'surrender') m.hitWhileSurrendered = true;
+        return best;
+      }
       m.hp = Math.max(0, m.hp - amount);
+      if (m.fsm.state === 'surrender' && m.hp >= 0) m.hitWhileSurrendered = true;
+      if (m.hp <= 0) {
+        m.downedUntil = now + DOWNED_DURATION_MS;
+        this.pending.push({ kind: 'mob-downed', id: m.id, name: m.name, x: m.x, y: m.y, downedUntil: m.downedUntil });
+      }
       return best;
     }
     const boss = this.bosses.find((b) => b.id === best);
     if (!boss) return -1;
+    // FINISH branch: melee only, on a downed boss (hp already 0; the next
+    // tick's updateBossSpawns emits the `boss-kill`).
+    if (boss.downedUntil > now) {
+      if (ranged) return -1;
+      boss.downedUntil = 0;
+      boss.stunUntil = 0;
+      if (attackerId > 0) boss.lastHitBy = attackerId;
+      return best;
+    }
     if (damageBoss(boss.ctl, amount) > 0 && attackerId > 0) boss.lastHitBy = attackerId;
+    if (boss.ctl.hp <= 0 && boss.downedUntil <= now) {
+      boss.downedUntil = now + DOWNED_DURATION_MS;
+      this.pending.push({
+        kind: 'mob-downed', id: boss.id, name: boss.name,
+        x: boss.ctl.x, y: boss.ctl.y, downedUntil: boss.downedUntil,
+      });
+    }
     return best;
+  }
+
+  /** True while the NPC (minion or boss) is downed right now. */
+  isNpcDowned(id: number, nowMs: number = Date.now()): boolean {
+    const m = this.minions.get(id);
+    if (m) return m.downedUntil > nowMs;
+    const b = this.bosses.find((e) => e.id === id);
+    return !!b && b.downedUntil > nowMs;
+  }
+
+  /**
+   * Stun an NPC until `untilMs` (thrown sidearms). Stunned fighters hold
+   * still and cannot attack. Returns false for unknown ids.
+   */
+  stunNpc(id: number, untilMs: number): boolean {
+    const m = this.minions.get(id);
+    if (m) {
+      if (m.hp <= 0) return false;
+      m.stunUntil = untilMs;
+      this.pending.push({ kind: 'mob-stun', id, until: untilMs });
+      return true;
+    }
+    const b = this.bosses.find((e) => e.id === id);
+    if (!b || b.dormant || b.ctl.dead) return false;
+    b.stunUntil = untilMs;
+    this.pending.push({ kind: 'mob-stun', id, until: untilMs });
+    return true;
   }
 
   /** Alive (non-dormant, non-corpse) bosses — snapshot + tick inclusion. */
@@ -393,12 +691,23 @@ export class NPCManager {
   }
 
   // ----------------------------------------------------------------- tick
-  /** Advance AI by dt (call at 10Hz). Returns damage/telegraph/boss-kill events. */
-  tick(dt: number, players: PlayerView[]): NpcEvent[] {
+  /**
+   * Advance AI by dt (call at 10Hz). Returns damage/telegraph/boss-kill
+   * events plus TAUNT `emote` bubbles (first acquisition) and `surrender`
+   * events. index.ts forwards unknown kinds as `{t:'event'}` payloads, so
+   * no protocol change was needed.
+   */
+  tick(dt: number, players: PlayerView[], nowMs: number = Date.now()): NpcEvent[] {
     const ev: NpcEvent[] = [];
+    // Damage-path events (downed/finish/stun) queued since the last tick go
+    // out first so the client learns the crawl state within one 10Hz step.
+    if (this.pending.length > 0) {
+      ev.push(...this.pending);
+      this.pending.length = 0;
+    }
     const targets = players.filter((p) => p.hp > 0);
 
-    this.updateBossSpawns(dt, targets, ev);
+    this.updateBossSpawns(dt, targets, ev, nowMs);
 
     // rebuild spatial hash: players + minions + awake bosses
     const pos = new Map<number, { x: number; y: number }>();
@@ -408,8 +717,43 @@ export class NPCManager {
     this.hash.rebuild(pos);
     const byId = new Map(players.map((p) => [p.id, p]));
 
+    // Target speeds for the moving-or-close leg of vision. Caller velocity
+    // wins; otherwise per-tick position deltas; first sighting reads as
+    // still (0) so sneaking works immediately.
+    const speeds = new Map<number, number>();
+    const step = dt > 0 ? dt : 0.1;
+    for (const p of players) {
+      if (p.hp <= 0) continue;
+      let sp: number;
+      if (typeof p.vx === 'number' && typeof p.vy === 'number') {
+        sp = Math.hypot(p.vx, p.vy);
+      } else {
+        const last = this.lastPos.get(p.id);
+        sp = last ? Math.hypot(p.x - last.x, p.y - last.y) / step : 0;
+      }
+      speeds.set(p.id, sp);
+    }
+    for (const p of players) this.lastPos.set(p.id, { x: p.x, y: p.y });
+    for (const id of [...this.lastPos.keys()]) {
+      if (!byId.has(id)) this.lastPos.delete(id);
+    }
+
     for (const m of this.minions.values()) {
       if (m.hp <= 0) {
+        // DOWNED crawl: hold still, no BT/FSM, no death timer. The corpse
+        // timer only runs for true deaths (downed flag cleared by a finish).
+        if (m.downedUntil > nowMs) continue;
+        if (m.downedUntil !== 0) {
+          // Unanswered knockdown: stand back up at partial HP, never bleed out.
+          m.hp = Math.max(1, Math.ceil(m.maxHp * DOWNED_RECOVER_FRAC));
+          m.downedUntil = 0;
+          m.deadT = 0;
+          m.surrenderRolled = false;
+          m.hitWhileSurrendered = false;
+          m.fsm.force('idle');
+          ev.push({ kind: 'mob-up', id: m.id });
+          continue;
+        }
         m.fsm.force('dead');
         m.deadT += dt;
         if (m.deadT > 5) {
@@ -424,7 +768,15 @@ export class NPCManager {
         }
         continue;
       }
-      // acquire nearest living player via spatial hash
+      // STUNNED (thrown sidearm): hold still — no sensing, no attacks — until
+      // the timer lapses. The crawl/death branch above already ran.
+      if (m.stunUntil > nowMs) continue;
+      // Sight range follows the zone underfoot (12u dungeon/volcano, 14u open).
+      const range = visionRangeAt(m.x, m.y);
+      // ALERT (chase/attack) and SEARCH track by cone+LoS+range only; calm
+      // states additionally need the target moving-or-close (sneak works).
+      const alert = m.fsm.state === 'chase' || m.fsm.state === 'attack';
+      const sweeping = m.fsm.state === 'search';
       const ids = this.hash.near(m.x, m.y, AGGRO_RANGE * 2.5);
       let target: PlayerView | null = null;
       let bd = Infinity;
@@ -432,35 +784,134 @@ export class NPCManager {
         const p = byId.get(id);
         if (!p || p.hp <= 0) continue;
         const d = Math.hypot(p.x - m.x, p.y - m.y);
-        if (d < bd) { bd = d; target = p; }
+        if (d >= bd || d > range) continue;
+        const q = {
+          nx: m.x, ny: m.y, facing: m.facing, tx: p.x, ty: p.y, range,
+          grid: this.grid, walls: this.walls, cell: CELL,
+          targetSpeed: speeds.get(p.id) ?? 0,
+        };
+        if (alert || sweeping ? canTrack(q) : canDetect(q)) {
+          bd = d;
+          target = p;
+        }
       }
-      const visible = !!target && bd <= AGGRO_RANGE;
+      const visible = target !== null;
       const distT = target ? bd : Infinity;
+      if (target) m.lastSeen = { x: target.x, y: target.y };
+
+      // Noise: calm minions within earshot turn toward the shot.
+      let heardNoise = false;
+      if (m.fsm.state === 'patrol' || m.fsm.state === 'idle') {
+        for (const n of this.noises) {
+          if (Math.hypot(n.x - m.x, n.y - m.y) <= NOISE_RADIUS) {
+            heardNoise = true;
+            m.noiseAt = { x: n.x, y: n.y };
+            break;
+          }
+        }
+        if (!heardNoise) m.noiseAt = null;
+      }
+
+      // Surrender election: solo + <=25% HP rolls once per life (40%).
+      const hpFrac = m.maxHp > 0 ? m.hp / m.maxHp : 0;
+      if (hpFrac > SURRENDER_HP_FRAC) m.surrenderRolled = false;
+      let wantSurrender = false;
+      if (!m.surrenderRolled && !m.surrenderBroken && hpFrac <= SURRENDER_HP_FRAC) {
+        let allies = false;
+        for (const o of this.minions.values()) {
+          if (o.id === m.id || o.hp <= 0) continue;
+          if (Math.hypot(o.x - m.x, o.y - m.y) <= ALLY_RADIUS) {
+            allies = true;
+            break;
+          }
+        }
+        m.surrenderRolled = true;
+        wantSurrender = shouldSurrender(m.hp, m.maxHp, allies, m.rng());
+      }
 
       // BT action selection
       m.bb.set('hp', m.hp);
       m.bb.set('maxHp', m.maxHp);
       m.bb.set('dist', visible ? distT : Infinity);
       m.bb.set('attackRange', ATTACK_RANGE);
-      m.bb.set('aggroRange', AGGRO_RANGE);
+      m.bb.set('aggroRange', range);
       m.bb.set('visible', visible);
       m.bt.reset();
       m.bt.tick(m.bb);
 
       // FSM locomotion state (authoritative for movement/death)
+      const prev = m.fsm.state;
       const st = m.fsm.update(dt, {
         hp: m.hp, maxHp: m.maxHp,
         targetVisible: visible, distToTarget: visible ? distT : Infinity,
-        attackRange: ATTACK_RANGE, aggroRange: AGGRO_RANGE, fleeThreshold: 0.25,
+        attackRange: ATTACK_RANGE, aggroRange: range, fleeThreshold: 0.25,
+        heardNoise, wantSurrender, wasAttacked: m.hitWhileSurrendered,
       });
+
+      // Entering surrender: hands-up event, hold still.
+      if (prev !== 'surrender' && st === 'surrender') {
+        m.hitWhileSurrendered = false;
+        m.path = [];
+        m.taunted = false;
+        ev.push({ kind: 'surrender', id: m.id, name: m.name, x: m.x, y: m.y });
+      }
+      // Leaving surrender via a hit: never re-roll this life (re-aggro).
+      if (prev === 'surrender' && st !== 'surrender') {
+        if (m.hitWhileSurrendered) m.surrenderBroken = true;
+        m.hitWhileSurrendered = false;
+        m.taunted = false;
+      }
+      // TAUNT on first acquisition: calm -> ALERT with a target in sight.
+      const wasAlert = prev === 'chase' || prev === 'attack';
+      const nowAlert = st === 'chase' || st === 'attack';
+      if (!wasAlert && nowAlert && target && !m.taunted) {
+        m.taunted = true;
+        m.facing = faceToward(m.x, m.y, target.x, target.y);
+        ev.push({
+          kind: 'emote', fromId: m.id, name: m.name,
+          emote: 'laugh', label: 'Taunt', x: m.x, y: m.y,
+          expiresAt: Date.now() + 2000, seq: this.emoteSeq++,
+        });
+      }
+      if (!nowAlert) m.taunted = false;
+      // Losing the target into SEARCH: sweep last-seen + 2 neighbors.
+      if ((prev === 'chase' || prev === 'attack') && st === 'search') {
+        const anchor = m.lastSeen ?? { x: m.x, y: m.y };
+        m.searchPts = [
+          { x: anchor.x, y: anchor.y },
+          { x: Math.max(0, Math.min(WORLD, anchor.x + SEARCH_OFFSET)), y: anchor.y },
+          { x: anchor.x, y: Math.max(0, Math.min(WORLD, anchor.y + SEARCH_OFFSET)) },
+        ];
+        m.searchIdx = 0;
+      }
 
       m.attackCd -= dt;
       m.repathT -= dt;
       const act = (m.bb.get<string>('act') ?? 'patrol') as string;
 
-      if (st === 'flee' || act === 'flee') {
+      if (st === 'surrender') {
+        // Hands up, stands still (tracks the threat with its stare).
+        if (target) m.facing = faceToward(m.x, m.y, target.x, target.y);
+      } else if (st === 'suspicious') {
+        // Stare toward the noise for 1.5s (the FSM stands down to patrol).
+        if (m.noiseAt) m.facing = faceToward(m.x, m.y, m.noiseAt.x, m.noiseAt.y);
+        else if (target) m.facing = faceToward(m.x, m.y, target.x, target.y);
+      } else if (st === 'search') {
+        // Sweep last-seen + neighbors; the 6s timer returns to patrol and
+        // vision re-acquires through the tracking leg while sweeping.
+        const pt = m.searchPts[m.searchIdx];
+        if (pt) {
+          const d = Math.hypot(pt.x - m.x, pt.y - m.y);
+          if (d < 1.0) {
+            if (m.searchIdx < m.searchPts.length - 1) m.searchIdx++;
+          } else {
+            this.moveAlongPath(m, pt.x, pt.y, SEARCH_SPEED, dt);
+          }
+        }
+      } else if (st === 'flee' || act === 'flee') {
         if (target) this.moveAway(m, target, 3.2, dt);
       } else if (st === 'attack' || act === 'attack') {
+        if (target) m.facing = faceToward(m.x, m.y, target.x, target.y);
         if (target && distT <= ATTACK_RANGE + 0.4 && m.attackCd <= 0) {
           m.attackCd = MELEE_COOLDOWN;
           ev.push({ kind: 'damage-player', targetId: target.id, amount: MELEE_DAMAGE, fromId: m.id });
@@ -478,9 +929,15 @@ export class NPCManager {
         void act;
       }
     }
+    // Noises are heard for exactly one tick (the 10Hz sense pass).
+    this.noises.length = 0;
 
     // bosses
     for (const b of this.awakeBosses()) {
+      // Thrown-sidearm stun eats the whole tick (no telegraphs, no movement).
+      // Downed bosses are already inert: their controller is dead (0 HP), so
+      // update() early-returns on its own.
+      if (b.stunUntil > nowMs) continue;
       for (const e of b.ctl.update(dt, targets)) this.pushBossEvent(e, b, targets, ev);
       // clamp to arena
       b.ctl.x = Math.max(1, Math.min(99, b.ctl.x));
@@ -495,8 +952,13 @@ export class NPCManager {
   /**
    * Lazy boss spawns: wake on approach, despawn after death. Emits `boss-kill`
    * exactly once per death (corpses stay visible for BOSS_CORPSE_SEC).
+   *
+   * Downed bosses (0 HP, crawl timer running) are NOT dead: no `boss-kill`,
+   * no corpse timer. Only a melee finish (downed flag cleared by
+   * damageFromPlayer) lets the death branch run. Unanswered knockdowns stand
+   * back up at partial HP via `mob-up`.
    */
-  private updateBossSpawns(dt: number, players: PlayerView[], ev: NpcEvent[]): void {
+  private updateBossSpawns(dt: number, players: PlayerView[], ev: NpcEvent[], nowMs: number = Date.now()): void {
     for (const b of this.bosses) {
       if (b.dormant) {
         const near = players.some(
@@ -506,6 +968,15 @@ export class NPCManager {
           this.resetBoss(b);
           b.dormant = false;
         }
+        continue;
+      }
+      if (b.downedUntil > nowMs) continue; // crawling: not dead yet
+      if (b.downedUntil !== 0) {
+        // Unanswered knockdown stood back up; never bled out.
+        b.ctl.hp = Math.max(1, Math.ceil(b.ctl.maxHp * DOWNED_RECOVER_FRAC));
+        b.ctl.phase = 'chase';
+        b.downedUntil = 0;
+        ev.push({ kind: 'mob-up', id: b.id });
         continue;
       }
       if (b.deadT > 0) {
@@ -527,6 +998,7 @@ export class NPCManager {
             x: b.ctl.x,
             y: b.ctl.y,
             killedBy: b.lastHitBy,
+            finisher: true,
           });
         }
       }
@@ -612,6 +1084,17 @@ export class NPCManager {
     m.x = wp.x; m.y = wp.y;
     m.hp = m.maxHp;
     m.path = []; m.deadT = 0;
+    m.downedUntil = 0;
+    m.stunUntil = 0;
+    const wp1 = m.patrol[1] ?? m.patrol[0];
+    m.facing = wp1 ? Math.atan2(wp1.y - m.y, wp1.x - m.x) : 0;
+    m.lastSeen = null;
+    m.searchPts = []; m.searchIdx = 0;
+    m.noiseAt = null;
+    m.taunted = false;
+    m.surrenderRolled = false;
+    m.surrenderBroken = false;
+    m.hitWhileSurrendered = false;
     m.fsm.force('idle');
   }
 
@@ -643,6 +1126,7 @@ export class NPCManager {
 
   private stepToward(m: Minion, tx: number, ty: number, speed: number, dt: number): void {
     const d = Math.hypot(tx - m.x, ty - m.y) || 0.001;
+    if (d > 1e-9) m.facing = Math.atan2(ty - m.y, tx - m.x);
     const step = Math.min(d, speed * dt);
     m.x = Math.max(0, Math.min(WORLD, m.x + ((tx - m.x) / d) * step));
     m.y = Math.max(0, Math.min(WORLD, m.y + ((ty - m.y) / d) * step));
@@ -650,6 +1134,7 @@ export class NPCManager {
 
   private moveAway(m: Minion, t: PlayerView, speed: number, dt: number): void {
     const d = Math.hypot(m.x - t.x, m.y - t.y) || 0.001;
+    if (d > 1e-9) m.facing = Math.atan2(m.y - t.y, m.x - t.x);
     m.x = Math.max(0, Math.min(WORLD, m.x + ((m.x - t.x) / d) * speed * dt));
     m.y = Math.max(0, Math.min(WORLD, m.y + ((m.y - t.y) / d) * speed * dt));
     m.path = [];
@@ -662,7 +1147,7 @@ export class NPCManager {
       if (m.hp <= 0 && m.deadT > 1) continue; // brief corpse, then hidden till respawn
       out.push({
         id: m.id, kind: 'mob', p: { x: m.x, y: m.y }, v: { x: 0, y: 0 },
-        hp: m.hp, maxHp: m.maxHp, name: m.name,
+        hp: m.hp, maxHp: m.maxHp, name: m.name, dir: m.facing,
       });
     }
     // Non-dormant bosses: includes the brief corpse so players can see what died
