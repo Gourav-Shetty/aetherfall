@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="200" viewBox="0 0 960 200">
+<defs><linearGradient id="zb" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#1b2a4a"/><stop offset="0.5" stop-color="#123f31"/><stop offset="1" stop-color="#4a2a1b"/></linearGradient></defs>
+<rect width="960" height="200" fill="url(#zb)"/>
+<polygon points="120,40 200,100 120,160 40,100" fill="none" stroke="#e8c66a" stroke-width="3"/>
+<polygon points="480,40 560,100 480,160 400,100" fill="none" stroke="#4dc3ff" stroke-width="3"/>
+<polygon points="840,40 920,100 840,160 760,100" fill="none" stroke="#ff5252" stroke-width="3"/>
+<text x="120" y="185" font-family="system-ui,sans-serif" font-size="14" letter-spacing="3" fill="#e8c66a" text-anchor="middle">MEADOW</text>
+<text x="480" y="185" font-family="system-ui,sans-serif" font-size="14" letter-spacing="3" fill="#4dc3ff" text-anchor="middle">HOLLOW DEEP</text>
+<text x="840" y="185" font-family="system-ui,sans-serif" font-size="14" letter-spacing="3" fill="#ff8080" text-anchor="middle">CALDERA</text>
+<text x="480" y="34" font-family="system-ui,sans-serif" font-size="20" font-weight="800" letter-spacing="6" fill="#e8eef7" text-anchor="middle">AETHERFALL ZONES</text>
+</svg>

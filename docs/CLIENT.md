@@ -348,6 +348,43 @@ presentation samplers. No new deps, assets, or build steps.
   scaling, fog-pass stability, and decoration determinism. Full client
   suite green (see Tests above).
 
+## Asset pipeline (content-addressed manifest)
+
+Tibia-inspired, original code: hash-named catalog + JSON manifest, tile
+walk/block flags derived server-side. No new runtime deps, no wire change.
+
+- **Builder** (`tools/manifest/build.mjs`, `npm run manifest`) — scans
+  `client/public/shots` + `docs/screenshots` + `client/public/art` (the last
+  ships 3 placeholder SVGs: `logo.svg`, `hero.svg`, `zone-banner.svg`) and
+  writes `client/public/manifest.json` as
+  `{ version, files: [{ file, sha256, bytes }] }`, where `file` is the
+  repo-root-relative posix path, `sha256` is the first 16 hex chars of the
+  file's SHA-256, `bytes` is the size, and `version` is the root package
+  version. Files sorted by `file`, fixed key order, 2-space JSON + trailing
+  newline — two builds over the same tree are byte-identical (pinned by
+  `tools/manifest/test/manifest.test.mjs`).
+- **Loader** (`client/src/assets.ts`) — `AssetLoader` fetches `manifest.json`
+  (returns `null`, never throws, when absent), lazy-loads art by name with an
+  in-memory cache (`load(name)` → public URL), and falls back to an inline
+  SVG data-URI placeholder (`placeholderFor(name)`, never blank) on any miss.
+  `preload(names, onProgress)` exposes `{ loaded, total, frac }` for the
+  loading screen; `parseManifest` validates the untrusted JSON shape.
+- **Boot wiring** (`client/src/main.ts`, additive) — the catalog preloads in
+  the background on Join (`Connecting… · art 1/3`) and on page load; a missing
+  manifest or failed fetch only yields placeholders, so the existing boot
+  (connect → welcome → snapshot → hide loading) works unchanged.
+- **Tile flags** (`engine/src/worldgen.ts` `TileFlags`/`tileFlagsFor` +
+  `engine/src/tileflags.ts` `tileFlags(x, y)`, `server/src/sim.ts`
+  `Sim.tileFlags(x, y)`) — `{ walk, block, hazard, biome, zone }` derived from
+  the existing zone/biome/hazard field (`block === hazard !== 'none'`, which
+  already encodes ocean→water and volcano→lava). The sim's circle collision
+  (`hitsTerrain`/`isFreeSpot`/`step`) reads the same block set through the
+  helper instead of inline `solidCircle` calls; `walls.json` interplay is
+  unchanged and the snapshot wire format is untouched (flags are
+  server-authoritative derivations only). Parity pinned over meadow/dungeon/
+  volcano samples (`engine/src/tileflags.test.ts`,
+  `server/src/sim_flags.test.ts`).
+
 ## Perf notes
 
 - Terrain + art: ≤ 12 steady-state base draw calls (ground, walls, water,

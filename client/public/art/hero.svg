@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+<rect width="128" height="128" rx="16" fill="#141a24"/>
+<circle cx="64" cy="104" r="26" fill="#000" opacity="0.35"/>
+<rect x="44" y="56" width="40" height="44" rx="8" fill="#ff9a4d"/>
+<circle cx="64" cy="40" r="18" fill="#f2c89b"/>
+<rect x="48" y="36" width="32" height="8" rx="4" fill="#1a2430"/>
+<rect x="86" y="60" width="6" height="40" rx="3" fill="#cfd6e4"/>
+<circle cx="64" cy="112" r="8" fill="none" stroke="#59d98c" stroke-width="3"/>
+<text x="64" y="20" font-family="system-ui,sans-serif" font-size="10" fill="#8fa3bf" text-anchor="middle">hero</text>
+</svg>

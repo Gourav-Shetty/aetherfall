@@ -1,6 +1,8 @@
 // @aetherfall/server — deterministic fixed-tick simulation.
 // Uses @aetherfall/engine World + SpatialHash. Gameplay systems plug in via hooks.
 import { World, SpatialHash } from '@aetherfall/engine';
+import { getBiome, getZone, tileFlagsFor, type TileFlags, type TileHazard } from '@aetherfall/engine';
+import { TERRAIN_SEED } from './terrain_sys.js';
 import type { EntitySnapshot } from '@aetherfall/shared';
 // WALLS: shared wall schema + slide collision (additive).
 import { PLAYER_RADIUS, circleHitsWalls, moveWithSlide, type WallRect } from '@aetherfall/shared';
@@ -165,8 +167,36 @@ export class Sim {
   }
 
   /**
+   * TILE FLAGS (Tibia-inspired walk/block metadata, additive): flags for the
+   * tile containing (x, y), derived from the existing zone / biome / hazard
+   * field. `block` is exactly the terrain block set the sim collides against
+   * (water/lava via the cached terrain layer when enabled, open arena when
+   * disabled), with `biome`/`zone` riding along for spawn/decoration context.
+   * Server-authoritative derivation only — the wire format is untouched.
+   */
+  tileFlags(x: number, y: number): TileFlags {
+    const tf = this.terrain;
+    const seed = tf?.seed ?? TERRAIN_SEED;
+    const biome = getBiome(x, y, seed);
+    const zone = getZone(x, y, seed);
+    let hazard: TileHazard = 'none';
+    if (tf !== null) {
+      const k = tf.kindAt(x, y);
+      hazard = k === 2 ? 'lava' : k === 1 ? 'water' : 'none';
+    }
+    return tileFlagsFor(biome, zone, hazard);
+  }
+
+  /** Point terrain block test through tileFlags (same block set as hitsTerrain). */
+  isTileBlocked(x: number, y: number): boolean {
+    return this.tileFlags(x, y).block;
+  }
+
+  /**
    * TERRAIN: does the body circle overlap solid terrain (ocean or lava)?
    * Cheap: a handful of typed-array reads out of the cached terrain layer.
+   * This is the same block set `tileFlags(x, y).block` reports per tile —
+   * the circle form needed for body collision (see tileFlags for the point form).
    */
   hitsTerrain(x: number, y: number, r: number = PLAYER_RADIUS): boolean {
     const tf = this.terrain;
@@ -176,8 +206,7 @@ export class Sim {
   /** TERRAIN: free = not inside an editor wall and not inside terrain. */
   isFreeSpot(x: number, y: number, r: number = PLAYER_RADIUS): boolean {
     if (this.hitsWall(x, y, r)) return false;
-    const tf = this.terrain;
-    return tf === null || !tf.solidCircle(x, y, r);
+    return !this.hitsTerrain(x, y, r);
   }
 
   /** TERRAIN: authoritative terrain height under a player id. */
@@ -220,27 +249,28 @@ export class Sim {
     this.tick++;
     for (const hook of this.preSystems) hook(this, dt);
     // TERRAIN: one branch per tick instead of one call per player.
-    const tf = this.terrain;
+    const hasTerrain = this.terrain !== null;
     for (const p of this.players.values()) {
       // WALLS: axis-separated slide (X then Y) so diagonal motion
       // along a wall keeps the free axis instead of sticking.
       const moved = moveWithSlide(p.x, p.y, p.vx * dt, p.vy * dt, PLAYER_RADIUS, this.walls);
       let nx = moved.x;
       let ny = moved.y;
-      if (tf !== null) {
+      if (hasTerrain) {
         // TERRAIN: second, independent pass against solid terrain. The
         // full step is tried first, then each axis alone, so a body walking
         // into the shoreline keeps sliding along it (1 probe when free,
-        // 3 when blocked, zero allocation).
-        if (tf.solidCircle(nx, ny, PLAYER_RADIUS)) {
+        // 3 when blocked, zero allocation). Reads the same block set
+        // tileFlags() reports, through the hitsTerrain circle helper.
+        if (this.hitsTerrain(nx, ny, PLAYER_RADIUS)) {
           // A body that is *already* inside solid terrain (knocked into the
           // lake) must be able to move back out, and a destination test alone
           // would wedge it: every step that reduces the overlap also overlaps
           // the tile it is leaving. Penetration is measured from the current
           // spot, which costs one extra probe only on already-blocked ticks.
-          if (!tf.solidCircle(p.x, p.y, PLAYER_RADIUS)) {
-            const ax = tf.solidCircle(nx, p.y, PLAYER_RADIUS) ? p.x : nx;
-            ny = tf.solidCircle(ax, ny, PLAYER_RADIUS) ? p.y : ny;
+          if (!this.hitsTerrain(p.x, p.y, PLAYER_RADIUS)) {
+            const ax = this.hitsTerrain(nx, p.y, PLAYER_RADIUS) ? p.x : nx;
+            ny = this.hitsTerrain(ax, ny, PLAYER_RADIUS) ? p.y : ny;
             nx = ax;
           }
         }

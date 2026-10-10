@@ -24,6 +24,7 @@ import { bossBars } from './bosses.js';
 import { SystemsView } from './social.js';
 import { EmoteBubbleLayer, PartyPanel, TalentPanel, VendorPanel } from './panels.js';
 import { TerrainView, zVisual } from './terrain_view.js';
+import { AssetLoader, DEFAULT_ART } from './assets.js';
 import {
   a11y, i18n, MOVE_KEYMAPS, moveVector, keyLabel, movementConflicts, isValidKeyCode, hexToRgb,
   type Locale, type MoveScheme, type PaletteMode,
@@ -134,6 +135,11 @@ let autoFallbackDone = false;
 // Its arena grid is built once, lazily (~3ms), then every tile lookup is an
 // array index.
 const terrain = new TerrainView();
+// ASSETS: content-addressed art catalog (tools/manifest/build.mjs). Best-effort:
+// boot works identically when manifest.json is absent (loader falls back to
+// inline SVG placeholders and never throws).
+const assets = new AssetLoader();
+void assets.loadManifest().catch(() => null);
 
 function toast(msg: string, ms = 2600) {
   const d = document.createElement('div');
@@ -1048,6 +1054,21 @@ function join() {
   sound.click();
   loadingEl.classList.add('show');
   loadingText.textContent = `Connecting to ${serverUrl()}…`;
+  // ASSETS: preload art in the background with loading-screen progress. Never
+  // blocks the net handshake: a missing manifest.json just yields placeholders.
+  void (async () => {
+    try {
+      if (!assets.manifest) await assets.loadManifest().catch(() => null);
+      const names = [...DEFAULT_ART];
+      await assets.preload(names, (p) => {
+        try {
+          if (!welcomed && loadingEl.classList.contains('show')) {
+            loadingText.textContent = `Connecting to ${serverUrl()}… · art ${p.loaded}/${p.total}`;
+          }
+        } catch { /* ignore */ }
+      }).catch(() => []);
+    } catch { /* ignore: boot continues without art */ }
+  })();
   try {
     net.connect(serverUrl(), name);
   } catch {

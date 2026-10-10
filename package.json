@@ -17,6 +17,7 @@
     "dev:server": "npm run dev --workspace=@aetherfall/server",
     "dev:client": "npm run dev --workspace=@aetherfall/client",
     "bots": "npm run start --workspace=@aetherfall/bots",
+    "manifest": "node tools/manifest/build.mjs",
     "ci": "npm run typecheck --workspaces && npm run test --workspaces && npm run build --workspaces"
   },
   "engines": {

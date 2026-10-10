@@ -1,0 +1,12 @@
+{
+  "name": "@aetherfall/manifest",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Content-addressed asset manifest builder (hash-named catalog, deterministic)",
+  "scripts": {
+    "build": "node ./build.mjs",
+    "typecheck": "node -e \"process.exit(0)\"",
+    "test": "node --test ./test/*.test.mjs"
+  }
+}

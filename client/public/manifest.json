@@ -1,0 +1,50 @@
+{
+  "version": "0.1.0",
+  "files": [
+    {
+      "file": "client/public/art/hero.svg",
+      "sha256": "15fe37e6591fd099",
+      "bytes": 656
+    },
+    {
+      "file": "client/public/art/logo.svg",
+      "sha256": "c8bf775c5c21babe",
+      "bytes": 651
+    },
+    {
+      "file": "client/public/art/zone-banner.svg",
+      "sha256": "faed3c3811f062c0",
+      "bytes": 1233
+    },
+    {
+      "file": "client/public/shots/combat-night-raid.svg",
+      "sha256": "5cba3e608e35ef12",
+      "bytes": 16680
+    },
+    {
+      "file": "client/public/shots/editor-boss-arena.svg",
+      "sha256": "d2aaab32d8ea97a0",
+      "bytes": 34608
+    },
+    {
+      "file": "client/public/shots/map-isometric-shrine.svg",
+      "sha256": "cdb62959f9ab9593",
+      "bytes": 16407
+    },
+    {
+      "file": "docs/screenshots/combat-night-raid.svg",
+      "sha256": "5cba3e608e35ef12",
+      "bytes": 16680
+    },
+    {
+      "file": "docs/screenshots/editor-boss-arena.svg",
+      "sha256": "d2aaab32d8ea97a0",
+      "bytes": 34608
+    },
+    {
+      "file": "docs/screenshots/map-isometric-shrine.svg",
+      "sha256": "cdb62959f9ab9593",
+      "bytes": 16407
+    }
+  ]
+}

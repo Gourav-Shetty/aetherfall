@@ -393,3 +393,44 @@ export function genDungeon(width: number, height: number, seed = DEFAULT_WORLD_S
 
   return { width, height, tiles, rooms, seed };
 }
+
+// -- tile flags (Tibia-inspired walk/block metadata, additive) -----------------
+// Original design: every world position carries { walk, block, hazard } derived
+// from the existing zone / biome / hazard field. `walk`/`block` describe the
+// *terrain* block set (ocean water + caldera lava) — the same set the server
+// sim collides against — while `biome`/`zone` ride along for decoration,
+// spawn and minimap use. Chunk-edge walls and the per-biome obstacle sprinkle
+// in genChunk() stay chunk-local and are NOT part of these flags; editor walls
+// (walls.json) stay a separate authoritative set in the sim.
+//
+// No behavior change: the sim reads this exact block set through its
+// `tileFlags(x, y)` helper instead of inline hazard checks, and the wire format
+// is untouched (flags are server-authoritative derivations only).
+
+/** Terrain hazard kind for a tile flag (mirrors terrain hazardAt().type). */
+export type TileHazard = 'none' | 'water' | 'lava';
+
+/** Walk/block metadata for one world position. */
+export interface TileFlags {
+  /** True when terrain allows movement (no water/lava). */
+  walk: boolean;
+  /** True when terrain blocks movement (water or lava). Always !walk. */
+  block: boolean;
+  /** Hazard kind at this position (drives DOT + tint, not just collision). */
+  hazard: TileHazard;
+  /** Biome at this position (presentation / spawn context). */
+  biome: Biome;
+  /** Overworld zone at this position (presentation / spawn context). */
+  zone: ZoneId;
+}
+
+/**
+ * Pure combiner: build flags from already-sampled biome / zone / hazard.
+ * `block` is exactly `hazard !== 'none'` — which already encodes the
+ * biome (ocean => water) and zone (volcano + low height => lava) inputs, so
+ * the block set matches hazardAt() by construction.
+ */
+export function tileFlagsFor(biome: Biome, zone: ZoneId, hazard: TileHazard): TileFlags {
+  const blocked = hazard !== 'none';
+  return { walk: !blocked, block: blocked, hazard, biome, zone };
+}
