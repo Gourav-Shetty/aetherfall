@@ -353,3 +353,208 @@ export async function generateFlavorLine(
     return fallback;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Chapter "STATIC" — parole interludes + twist reveal (ADDITIVE).
+// ---------------------------------------------------------------------------
+// Two walk-and-talk scenes (one room, two NPCs, 6 dialogue lines each,
+// skippable) plus the mission-5 caller reveal. All copy is ORIGINAL,
+// neon-noir in AETHERFALL's own setting. These nodes are standalone data:
+// existing Elder Maren nodes above are untouched, and QuestGiverDialogue
+// keeps working with its default node set.
+
+/** Parole A: Copper Kettle back room (after mission 2). Bram + Sella, 6 lines. */
+export const STATIC_PAROLE_A_NODES: DialogueNode[] = [
+  {
+    id: 'parole-a-0',
+    speaker: 'Bram Vey',
+    text: 'Back room. Dry floor. Talk low — the Kettle’s front is all ears tonight.',
+    options: [
+      { label: '(Follow him in.)', next: 'parole-a-1' },
+      { label: '(Skip the walk.)', next: 'parole-a-end' },
+    ],
+  },
+  {
+    id: 'parole-a-1',
+    speaker: 'Sella Qinn',
+    text: 'You got one too, then. Dead booth ringing, no coin in the slot, voice like rain on glass.',
+    options: [
+      { label: '"Who is paying through the booths?"', next: 'parole-a-2' },
+      { label: '(Skip ahead.)', next: 'parole-a-end' },
+    ],
+  },
+  {
+    id: 'parole-a-2',
+    speaker: 'Bram Vey',
+    text: 'Nobody pays through dead booths. Unless they wired the tithe-boxes to the ward-line and never told Maren.',
+    options: [
+      { label: '"The shards? The tithe?"', next: 'parole-a-3' },
+      { label: '(Skip ahead.)', next: 'parole-a-end' },
+    ],
+  },
+  {
+    id: 'parole-a-3',
+    speaker: 'Sella Qinn',
+    text: 'Six ember-shards a drop, every job. Somebody is feeding the static instead of the merchants. That is devotion or debt.',
+    options: [
+      { label: '"Have you seen the caller?"', next: 'parole-a-4' },
+      { label: '(Skip ahead.)', next: 'parole-a-end' },
+    ],
+  },
+  {
+    id: 'parole-a-4',
+    speaker: 'Bram Vey',
+    text: 'Nobody sees them. Jobs get done, booths go quiet, new message clicks in. Ask Maren about her relay crew — watch her face.',
+    options: [
+      { label: '(Step back out into the rain.)', next: 'parole-a-end' },
+      { label: '(Skip.)', next: 'parole-a-end' },
+    ],
+  },
+  {
+    id: 'parole-a-end',
+    speaker: 'Sella Qinn',
+    text: 'Keep answering or don’t. But if the booths all ring at once — run toward them, courier’s honor.',
+    options: [{ label: '(Leave.)', next: 'parole-a-end' }],
+  },
+];
+
+/** Parole B: Rust Chapel vestry (after mission 4). Odo + Tilda, 6 lines. */
+export const STATIC_PAROLE_B_NODES: DialogueNode[] = [
+  {
+    id: 'parole-b-0',
+    speaker: 'Pale Odo',
+    text: 'Vestry. Candles unlit to save oil. Sit — the chapel hears everything the booths say.',
+    options: [
+      { label: '(Sit.)', next: 'parole-b-1' },
+      { label: '(Skip the walk.)', next: 'parole-b-end' },
+    ],
+  },
+  {
+    id: 'parole-b-1',
+    speaker: 'Tilda Vess',
+    text: 'I sweep the relay housings for Maren. The Exchange line should be dead. It hums her old call-sign.',
+    options: [
+      { label: '"Whose call-sign?"', next: 'parole-b-2' },
+      { label: '(Skip ahead.)', next: 'parole-b-end' },
+    ],
+  },
+  {
+    id: 'parole-b-2',
+    speaker: 'Pale Odo',
+    text: 'Maren had an apprentice. Signal-tender. The Fall took the relay and the girl in one night, or so the mourning wall says.',
+    options: [
+      { label: '"You think she is the caller?"', next: 'parole-b-3' },
+      { label: '(Skip ahead.)', next: 'parole-b-end' },
+    ],
+  },
+  {
+    id: 'parole-b-3',
+    speaker: 'Tilda Vess',
+    text: 'I think the static learned her voice and never let go. Either way — the Exchange is warm. Something alive is down there.',
+    options: [
+      { label: '"What should I do?"', next: 'parole-b-4' },
+      { label: '(Skip ahead.)', next: 'parole-b-end' },
+    ],
+  },
+  {
+    id: 'parole-b-4',
+    speaker: 'Pale Odo',
+    text: 'Finish the Meridian walk, answer the last message, and go gently. If it is her, she has been alone a long, long time.',
+    options: [
+      { label: '(Rise to leave.)', next: 'parole-b-end' },
+      { label: '(Skip.)', next: 'parole-b-end' },
+    ],
+  },
+  {
+    id: 'parole-b-end',
+    speaker: 'Tilda Vess',
+    text: 'Tell Maren nothing yet. Let the caller tell you herself — she earned the telling.',
+    options: [{ label: '(Leave.)', next: 'parole-b-end' }],
+  },
+];
+
+/** Twist reveal at the Ashfall Exchange (mission 5): Wren answers in person. */
+export const STATIC_REVEAL_NODES: DialogueNode[] = [
+  {
+    id: 'reveal-0',
+    speaker: 'Wren Halloway',
+    text: 'You kept picking up, so I kept calling. I am Wren Halloway — Maren taught me the relays, and the Fall buried me in one.',
+    options: [
+      { label: '"Why the booths? Why me?"', next: 'reveal-1' },
+      { label: '(Skip.)', next: 'reveal-end' },
+    ],
+  },
+  {
+    id: 'reveal-1',
+    speaker: 'Wren Halloway',
+    text: 'The ward-line only carries voices that pay in shards. I had no hands left to gather — so I borrowed yours, booth by booth.',
+    options: [
+      { label: '"Maren thinks you are gone."', next: 'reveal-2' },
+      { label: '(Skip.)', next: 'reveal-end' },
+    ],
+  },
+  {
+    id: 'reveal-2',
+    speaker: 'Wren Halloway',
+    text: 'She left me holding the switchboard when the mountain spoke. Tell her the Exchange is quiet now. Tell her I kept the lights on.',
+    options: [{ label: '(Take the receiver.)', next: 'reveal-end' }],
+  },
+  {
+    id: 'reveal-end',
+    speaker: 'Wren Halloway',
+    text: 'Take my receiver. Wear it hollow-side out. You are Callerbound — and Emberfall can stare all it likes.',
+    options: [{ label: '(Leave.)', next: 'reveal-end' }],
+  },
+];
+
+/** All STATIC dialogue nodes in one map (paroles + reveal). */
+export const STATIC_DIALOGUE_NODES: DialogueNode[] = [
+  ...STATIC_PAROLE_A_NODES,
+  ...STATIC_PAROLE_B_NODES,
+  ...STATIC_REVEAL_NODES,
+];
+
+/**
+ * Minimal walker for STATIC scenes. Works over any DialogueNode[]: `advance()`
+ * follows option 0 (the "continue" line), `skip()` jumps to the scene's end
+ * node, and every node exposes its options so trees stay coverable by tests.
+ */
+export class StaticSceneDialogue {
+  private nodes = new Map<string, DialogueNode>();
+  private endId: string;
+  state: DialogueState;
+
+  constructor(nodes: DialogueNode[], startId: string, endId: string, playerName = 'traveler') {
+    for (const n of nodes) this.nodes.set(n.id, n);
+    this.endId = endId;
+    this.state = { nodeId: startId, quest: 'not-started', playerName };
+  }
+
+  current(): DialogueNode {
+    return this.nodes.get(this.state.nodeId) ?? this.nodes.get(this.endId)!;
+  }
+
+  choose(index: number): DialogueNode {
+    const cur = this.current();
+    const opt = cur.options[index];
+    if (!opt) return cur;
+    if (opt.setQuest) this.state.quest = opt.setQuest;
+    this.state.nodeId = opt.next;
+    return this.current();
+  }
+
+  /** Follow the first option ("continue"). */
+  advance(): DialogueNode {
+    return this.choose(0);
+  }
+
+  /** Jump to the scene's end node (paroles are skippable). */
+  skip(): DialogueNode {
+    this.state.nodeId = this.endId;
+    return this.current();
+  }
+
+  get isAtEnd(): boolean {
+    return this.state.nodeId === this.endId;
+  }
+}

@@ -254,3 +254,51 @@ x, y, rand)` → `applyBossKillRewards()` → `boss-kill` + `xp-gain` +
 `ember-wyrm` falls back to the `volcano` zone table and `crypt-warden` to
 `dungeon` (`BOSS_ZONE` / `bossZoneFor()`), so both shower materials even if the
 named entries are retuned.
+
+## Chapter "STATIC" (voicemail missions + parole interludes + twist)
+
+Ownership: `server/src/story/chapter.ts` (missions, gating, payoff) +
+`server/src/story/calls.ts` (voicemails) + parole/reveal dialogue in
+`server/src/ai/dialogue.ts` (`STATIC_PAROLE_A/B_NODES`, `STATIC_REVEAL_NODES`,
+`StaticSceneDialogue`) + client `StaticChapterTracker` (`client/src/quests.ts`)
++ `PhoneBoothPanel` / `QuestLogPanel` / `IntroCardOverlay` (`client/src/panels.ts`).
+
+Original neon-noir plot written for AETHERFALL (all names and places are
+original; only the delivery shape — cryptic calls, walk-and-talk paroles,
+final twist — nods to the genre). After the Fall, Emberfall's dead
+ward-stone conduits still hum. Public call-booths ring at odd hours with
+voicemails from `UNKNOWN NUMBER`, each one a job: go to a landmark, do the
+work, lift any receiver for the next message.
+
+| # | Mission | Act | Landmark | Zone |
+| - | ------- | --- | -------- | ---- |
+| 1 | Porchlight (`static-porchlight`) | kill 4 | Brazen Porch | meadow |
+| 2 | Kiosk Tithe (`static-kiosk`) | collect 6 ember-shards | Flicker Kiosk Row | meadow |
+| 3 | Arcade Sweep (`static-arcade`) | kill 6 | Sunken Arcade | dungeon |
+| 4 | Meridian Walk (`static-meridian`) | explore 4 points | Glass Meridian | dungeon |
+| 5 | Exchange Silence (`static-exchange`) | kill 8 | Ashfall Exchange | volcano |
+
+Progression is strictly sequential in the existing `QuestState.progress` map
+(`static-*` keys; `quests_progress.quest_id` is free-form TEXT so no schema
+change): `staticOnKill` / `staticOnCollect` / `staticOnExplore` accrue only
+the unlocked mission, XP follows the 40/60/90/120/200 curve, and progress
+surfaces as the usual `quest-progress` / `quest-complete` events the
+quest-log panel already feeds.
+
+Paroles (skippable, one room + two NPCs + 6 lines each): after mission 2, the
+Copper Kettle back room — fence Bram Vey and night courier Sella Qinn argue
+over who pays through dead booths; after mission 4, the Rust Chapel vestry —
+keeper Pale Odo and relay-sweeper Tilda Vess admit the voice sounds like
+someone Elder Maren lost.
+
+Twist + payoff: the caller is **Wren Halloway**, Maren's signal-tender
+apprentice, believed lost when the ward-relay collapsed during the Fall. She
+has lived inside the Ashfall Exchange ever since, splicing her voice through
+dead conduits and hiring strangers booth by booth to clear the shard-choked
+lines so the relay can finally shut down. Finishing mission 5 grants the
+unique mask **Hollow Receiver** (`hollow-receiver`, "For the one who
+answered. — W.H.") and the title **Callerbound**. Chapter intro cards
+(`EMBERFALL // AFTER THE FALL` / `CHANNEL 0 — STATIC` / `PICK UP.`) render
+as a VHS-style overlay: skippable (ENTER advances, ESC skips) and
+reduced-motion safe (chromatic-aberration shadow removed under
+`prefers-reduced-motion` / `data-a11y-motion="reduced"`).

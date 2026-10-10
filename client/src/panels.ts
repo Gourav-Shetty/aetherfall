@@ -436,3 +436,258 @@ export class TalentPanel {
     );
   }
 }
+
+// ---------------------------------------------------------------------------
+// Chapter "STATIC" panels (ADDITIVE): phone booth, quest log, VHS intro cards.
+// ---------------------------------------------------------------------------
+// Same conventions as the panels above: own roots + own stylesheet, revision
+// gated renders, `ownerDocument` element factory (headless-safe), escaped
+// server text. Nothing above is modified.
+
+import type { StaticChapterTracker } from './quests.js';
+
+export const STATIC_PANEL_CSS = `
+/* ---------- STATIC chapter panels (phone booth / quest log / VHS cards) --- */
+.af-booth{position:absolute;left:10px;bottom:10px;width:300px;z-index:8;background:rgba(8,12,24,.88);
+  border:1px solid rgba(77,195,255,.45);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.5);padding:8px 10px;font-size:12px;display:none}
+.af-booth.open{display:block}
+.af-booth h3{margin:0 0 6px;font-size:11px;letter-spacing:2px;color:#4dc3ff}
+.af-booth .af-caller{color:#ffe066;font-size:11px;letter-spacing:1px}
+.af-booth .af-subject{color:#8fa3bf;font-size:10px;margin:2px 0 6px}
+.af-booth .af-lines{color:#d8e6ff;font-size:12px;line-height:1.5;white-space:pre-wrap}
+.af-booth .af-act{margin-top:6px;color:#59d98c;font-size:11px}
+.af-questlog{position:absolute;left:10px;top:10px;width:300px;z-index:7;background:rgba(13,19,38,.8);
+  border:1px solid rgba(232,198,106,.35);border-radius:8px;padding:8px 10px;font-size:12px;display:none}
+.af-questlog.open{display:block}
+.af-questlog h3{margin:0 0 6px;font-size:11px;letter-spacing:2px;color:#e8c66a}
+.af-qrow{padding:3px 0;border-bottom:1px solid rgba(58,69,87,.5)}
+.af-qrow:last-child{border-bottom:none}
+.af-qrow.done{opacity:.65}.af-qrow.done .af-qlabel{text-decoration:line-through}
+.af-qrow .af-qlabel{color:#e8efff}
+.af-qrow .af-qdetail{color:#8fa3bf;font-size:10px}
+.af-archive{margin-top:6px;color:#8fa3bf;font-size:10px}
+.af-vhs{position:absolute;inset:0;z-index:30;display:none;align-items:center;justify-content:center;
+  background:rgba(2,4,10,.72);pointer-events:auto}
+.af-vhs.open{display:flex}
+.af-vhs .af-vhs-card{font-family:monospace;font-size:22px;letter-spacing:4px;color:#e8efff;
+  text-shadow:0 0 8px #4dc3ff,2px 0 0 rgba(255,0,80,.5),-2px 0 0 rgba(0,255,200,.5);
+  border-top:2px solid rgba(232,239,255,.4);border-bottom:2px solid rgba(232,239,255,.4);padding:12px 24px}
+.af-vhs .af-vhs-hint{position:absolute;bottom:18px;font-size:11px;color:#8fa3bf;font-family:monospace}
+.af-vhs .af-vhs-skip{position:absolute;top:14px;right:14px;font-size:11px;color:#e8c66a;cursor:pointer;font-family:monospace}
+@media (prefers-reduced-motion:reduce){.af-vhs .af-vhs-card{text-shadow:none}}
+html[data-a11y-motion="reduced"] .af-vhs .af-vhs-card{text-shadow:none!important}
+`;
+
+let staticCssInjected = false;
+
+function injectStaticCss(parent: HTMLElement): void {
+  if (staticCssInjected) return;
+  staticCssInjected = true;
+  try {
+    const doc = parent.ownerDocument;
+    if (!doc) return;
+    const style = doc.createElement('style');
+    style.textContent = STATIC_PANEL_CSS;
+    doc.head.appendChild(style);
+  } catch {
+    /* detached document: markup still renders */
+  }
+}
+
+function makeStaticEl(parent: HTMLElement, tag: string, className = ''): HTMLElement {
+  const doc = parent.ownerDocument;
+  if (!doc) throw new Error('static panels: root has no ownerDocument');
+  const el = doc.createElement(tag);
+  if (className) el.className = className;
+  return el;
+}
+
+/**
+ * Phone-booth UI: voicemail-style messages from UNKNOWN NUMBER (pre-twist)
+ * or Wren Halloway (mission 5). Shows the ACTIVE mission's call only, with
+ * its landmark act + return hint. Skippable/dismissable; never blocks input.
+ */
+export class PhoneBoothPanel {
+  readonly el: HTMLElement;
+  private body: HTMLElement;
+  private lastRevision = -1;
+  private dismissed = false;
+
+  constructor(parent: HTMLElement, private tracker: StaticChapterTracker) {
+    injectStaticCss(parent);
+    const root = makeStaticEl(parent, 'div', 'af-booth');
+    root.id = 'af-booth';
+    const head = makeStaticEl(parent, 'h3');
+    head.textContent = '☎ CALL-BOOTH';
+    root.appendChild(head);
+    this.body = makeStaticEl(parent, 'div');
+    this.body.id = 'af-booth-body';
+    root.appendChild(this.body);
+    parent.appendChild(root);
+    this.el = root;
+  }
+
+  /** Dismiss the booth for this session (player hung up). */
+  hangUp(): void {
+    this.dismissed = true;
+    this.el.classList.remove('open');
+  }
+
+  /** Re-open after a hang-up (a new message clicks in). */
+  pickUp(): void {
+    this.dismissed = false;
+    this.lastRevision = -1;
+  }
+
+  get isDismissed(): boolean {
+    return this.dismissed;
+  }
+
+  render(): boolean {
+    if (this.tracker.revision === this.lastRevision && !this.dismissed) return false;
+    this.lastRevision = this.tracker.revision;
+    const active = this.tracker.active();
+    if (this.dismissed || !active) {
+      this.el.classList.remove('open');
+      this.body.innerHTML = '';
+      return true;
+    }
+    this.el.classList.add('open');
+    const isTwist = active.id === 'static-exchange';
+    const caller = isTwist ? 'Wren Halloway' : 'UNKNOWN NUMBER';
+    const subject = isTwist ? 'MSG 05 — EXCHANGE SILENCE' : `MSG 0${active.seq} — ${active.name.toUpperCase()}`;
+    this.body.innerHTML =
+      `<div class="af-caller">${esc(caller)}</div>` +
+      `<div class="af-subject">${esc(subject)} · ${esc(active.landmark)}</div>` +
+      `<div class="af-lines">${esc(active.briefing)}</div>` +
+      `<div class="af-act">${esc(active.returnHint)}</div>`;
+    return true;
+  }
+}
+
+/**
+ * Quest-log panel: active chapter, mission checklist with live counts (fed by
+ * the same `quest-progress` / `quest-complete` events as the Maren chain),
+ * plus a completed archive. Revision-gated like every other panel.
+ */
+export class QuestLogPanel {
+  readonly el: HTMLElement;
+  private list: HTMLElement;
+  private archiveEl: HTMLElement;
+  private head: HTMLElement;
+  private lastRevision = -1;
+
+  constructor(parent: HTMLElement, private tracker: StaticChapterTracker) {
+    injectStaticCss(parent);
+    const root = makeStaticEl(parent, 'div', 'af-questlog');
+    root.id = 'af-questlog';
+    const head = makeStaticEl(parent, 'h3');
+    head.textContent = 'STATIC — QUEST LOG';
+    root.appendChild(head);
+    this.head = makeStaticEl(parent, 'div', 'af-archive');
+    this.head.id = 'af-questlog-head';
+    root.appendChild(this.head);
+    this.list = makeStaticEl(parent, 'div');
+    this.list.id = 'af-questlog-list';
+    root.appendChild(this.list);
+    this.archiveEl = makeStaticEl(parent, 'div', 'af-archive');
+    this.archiveEl.id = 'af-questlog-archive';
+    root.appendChild(this.archiveEl);
+    parent.appendChild(root);
+    this.el = root;
+  }
+
+  render(): boolean {
+    if (this.tracker.revision === this.lastRevision) return false;
+    this.lastRevision = this.tracker.revision;
+    this.el.classList.add('open');
+    const rows = this.tracker.toChecklist();
+    const pct = Math.round(this.tracker.chapterProgress() * 100);
+    this.head.textContent = `Chapter STATIC · ${pct}%`;
+    this.list.innerHTML = rows
+      .map((r) => {
+        const cls = r.done ? 'af-qrow done' : 'af-qrow';
+        return (
+          `<div class="${cls}" data-mission="${esc(r.id)}">` +
+          `<div class="af-qlabel">${esc(r.label)}</div>` +
+          `<div class="af-qdetail">${esc(r.detail)}</div>` +
+          '</div>'
+        );
+      })
+      .join('');
+    const done = this.tracker.archive();
+    this.archiveEl.textContent =
+      done.length === 0 ? 'Archive: —' : `Archive: ${done.map((m) => m.name).join(', ')}`;
+    return true;
+  }
+}
+
+/**
+ * VHS-style chapter intro cards (overlay text, skippable, reduced-motion
+ * safe). `reducedMotion` (or the `data-a11y-motion="reduced"` / media query
+ * CSS above) strips the chromatic-aberration shadow; `skip()` dismisses all
+ * cards at once for players and tests alike.
+ */
+export class IntroCardOverlay {
+  readonly el: HTMLElement;
+  private card: HTMLElement;
+  private lastKey = '';
+  dismissed = false;
+
+  constructor(parent: HTMLElement, private tracker: StaticChapterTracker, private reducedMotion = false) {
+    injectStaticCss(parent);
+    const root = makeStaticEl(parent, 'div', 'af-vhs');
+    root.id = 'af-vhs';
+    if (reducedMotion) root.setAttribute('data-motion', 'reduced');
+    const skip = makeStaticEl(parent, 'div', 'af-vhs-skip');
+    skip.textContent = '[ SKIP ]';
+    skip.setAttribute('data-skip', 'vhs');
+    root.appendChild(skip);
+    this.card = makeStaticEl(parent, 'div', 'af-vhs-card');
+    this.card.id = 'af-vhs-card';
+    root.appendChild(this.card);
+    const hint = makeStaticEl(parent, 'div', 'af-vhs-hint');
+    hint.textContent = 'ENTER ▸ next · ESC ▸ skip · tracking auto';
+    root.appendChild(hint);
+    parent.appendChild(root);
+    this.el = root;
+  }
+
+  setReducedMotion(v: boolean): void {
+    this.reducedMotion = v;
+    if (v) this.el.setAttribute('data-motion', 'reduced');
+  }
+
+  get isReducedMotion(): boolean {
+    return this.reducedMotion;
+  }
+
+  /** Advance one card (ENTER). Dismisses the overlay past the last card. */
+  next(): void {
+    this.tracker.advanceIntro();
+    if (this.tracker.currentIntroCard() === null) this.dismissed = true;
+    this.lastKey = '';
+  }
+
+  /** Dismiss every remaining card (ESC / SKIP). */
+  skip(): void {
+    this.tracker.skipIntro();
+    this.dismissed = true;
+    this.lastKey = '';
+  }
+
+  render(): boolean {
+    const text = this.dismissed ? null : this.tracker.currentIntroCard();
+    const key = `${this.dismissed}:${text ?? '-'}`;
+    if (key === this.lastKey) return false;
+    this.lastKey = key;
+    if (text === null) {
+      this.el.classList.remove('open');
+      this.card.innerHTML = '';
+      return true;
+    }
+    this.el.classList.add('open');
+    this.card.textContent = text;
+    return true;
+  }
+}

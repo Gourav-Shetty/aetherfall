@@ -48,6 +48,9 @@
     "src/renderer3d.ts",
     "src/hud.ts",
     "src/renderer2d.ts",
-    "src/polish.test.ts"
+    "src/polish.test.ts",
+    "src/assets.ts",
+    "src/assets.test.ts",
+    "src/static.test.ts"
   ]
 }
