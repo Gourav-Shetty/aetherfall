@@ -6,9 +6,25 @@
 import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { CanvasRenderer } from './renderer2d.js';
+import { IsoRenderer } from './renderer3d.js';
 import { HUD } from './hud.js';
 import { Ctx2D, ElStub } from './domstub.js';
 import { TERR_WATER, TerrainView } from './terrain_view.js';
+import {
+  BurstPool,
+  avatarVariant,
+  blobShadowTexture,
+  createLevelBeam,
+  decorMatrices,
+  glowTexture,
+  hash2i,
+  planDecorations,
+  tileEdgeTexture,
+  tileShade,
+  triggerLevelBeam,
+  updateLevelBeam,
+  type DecorTerrain,
+} from './scene_art.js';
 import { PALETTES, hexToRgb } from './a11y.js';
 import type { DrawEntity } from './types.js';
 
@@ -290,5 +306,221 @@ describe('a11y palette overrides (Canvas2D)', () => {
     c.telegraph(50, 50, 4, 900, 'golem-slam');
     c.render([], 50, 50, 1000);
     assert.ok(ctx.count('arc') > 0, 'telegraph ring arcs drawn');
+  });
+});
+
+describe('IsoRenderer stylized art (headless, no WebGL)', () => {
+  function makeIso() {
+    const container = new ElStub();
+    const iso = IsoRenderer.createHeadless(
+      container as unknown as HTMLElement, new TerrainView(),
+    );
+    return { iso, container };
+  }
+
+  function demoList(): DrawEntity[] {
+    return [
+      ent(1, 'hero', 50, 50, 'player', true),
+      ent(2, 'gloomfang-1', 52, 50),
+      ent(3, 'Elder Maren', 51, 51, 'npc'),
+      ent(4, 'shard', 49, 49, 'pickup'),
+      ent(5, 'bolt', 50.5, 50, 'projectile'),
+    ];
+  }
+
+  it('updates without throwing and keeps scene child count stable', () => {
+    const { iso } = makeIso();
+    try {
+      const list = demoList();
+      iso.update(list, 50, 50, 1000);
+      const steady = iso.childCount();
+      assert.ok(steady > 10, `scene populated (${steady})`);
+      for (let i = 1; i <= 5; i++) {
+        iso.update(list, 50 + i * 0.2, 50 + i * 0.1, 1000 + i * 16);
+        assert.equal(iso.childCount(), steady, `frame ${i} adds no scene children`);
+      }
+    } finally {
+      iso.dispose();
+    }
+  });
+
+  it('entity removal drops exactly one child (death burst is pooled)', () => {
+    const { iso } = makeIso();
+    try {
+      const list = demoList();
+      iso.update(list, 50, 50, 1000);
+      iso.update(list, 50, 50, 1016);
+      const before = iso.childCount();
+      const short = list.filter((e) => e.id !== 2);
+      iso.update(short, 50, 50, 1032);
+      assert.equal(iso.childCount(), before - 1, 'removed avatar frees its group, burst reuses the pool');
+      iso.update(short, 50, 50, 1048);
+      assert.equal(iso.childCount(), before - 1, 'steady again after the death');
+    } finally {
+      iso.dispose();
+    }
+  });
+
+  it('base draw calls stay within the perf budget', () => {
+    const { iso } = makeIso();
+    try {
+      iso.update(demoList(), 50, 50, 1000);
+      const n = iso.baseDrawCalls();
+      assert.ok(n <= 12, `base draw calls ${n} <= 12`);
+      assert.ok(n >= 6, `scene is actually populated (${n})`);
+    } finally {
+      iso.dispose();
+    }
+  });
+
+  it('setQuality scales decoration density without throwing', () => {
+    const { iso } = makeIso();
+    try {
+      iso.update(demoList(), 50, 50, 1000);
+      const hi = iso.decorPlanSnapshot().length;
+      iso.setQuality(1, 12);
+      iso.update(demoList(), 50, 50, 1016);
+      const lo = iso.decorPlanSnapshot().length;
+      assert.ok(lo <= hi, `low (${lo}) <= high (${hi})`);
+      assert.ok(lo > 0, 'low quality keeps some decoration');
+      iso.setQuality(2, 60);
+      iso.update(demoList(), 50, 50, 1032);
+      assert.equal(iso.decorPlanSnapshot().length, hi, 'restoring quality restores the plan');
+    } finally {
+      iso.dispose();
+    }
+  });
+
+  it('combat fx (flash, burst, beam, telegraph, palette) never throw', () => {
+    const { iso } = makeIso();
+    try {
+      iso.update(demoList(), 50, 50, 1000);
+      const steady = iso.childCount();
+      iso.flash(50, 50, 0xffffff);
+      iso.deathBurst(51, 51, 0xffd27f);
+      iso.levelUp(50, 50);
+      iso.telegraph(45, 50, 4, 900);
+      iso.telegraph(NaN, 50, 4, 900); // malformed input is ignored
+      iso.setEntityColors({ mob: 0xcc79a7, npc: NaN });
+      iso.setTelegraphColor(0xf0e442);
+      iso.setFog(fogStub, 50, 50);
+      iso.shake(0.5);
+      iso.update(demoList(), 50, 50, 1016);
+      assert.ok(iso.childCount() >= steady, 'fx only adds transient children');
+      // project/screenToWorld round-trip stays finite headless.
+      const p = iso.project(50, 50);
+      assert.ok(Number.isFinite(p.sx) && Number.isFinite(p.sy));
+    } finally {
+      iso.dispose();
+    }
+  });
+
+  it('fog retint pass keeps children stable', () => {
+    const { iso } = makeIso();
+    try {
+      iso.setFog(fogStub, 50, 50);
+      iso.update(demoList(), 50, 50, 1000);
+      // Force the throttled pass regardless of wall-clock time.
+      (iso as unknown as { lastFogApply: number }).lastFogApply = 0;
+      const before = iso.childCount();
+      iso.update(demoList(), 50.5, 50.2, 1016);
+      assert.equal(iso.childCount(), before, 'fog retint never adds children');
+    } finally {
+      iso.dispose();
+    }
+  });
+});
+
+describe('decoration determinism (scene_art)', () => {
+  function stubTerrain(zone: string): DecorTerrain {
+    return {
+      kindAtTile: () => 0,
+      heightAtTile: () => 5,
+      slopeFromGrid: () => 0.2,
+      biomeAtTile: () => 'plains',
+      zoneAtTile: () => zone,
+    };
+  }
+
+  it('same seed yields identical matrices', () => {
+    const t = stubTerrain('meadow');
+    const a = planDecorations(t, 1337, 400, 1);
+    const b = planDecorations(t, 1337, 400, 1);
+    assert.deepEqual(decorMatrices(a), decorMatrices(b));
+    assert.deepEqual(a, b);
+  });
+
+  it('caps instances and honors the density scale', () => {
+    const t = stubTerrain('meadow');
+    const hi = planDecorations(t, 1337, 400, 1);
+    const lo = planDecorations(t, 1337, 400, 0.35);
+    assert.ok(hi.length <= 400, `capped (${hi.length})`);
+    assert.ok(hi.length > 100, 'a meadow still decorates');
+    assert.ok(lo.length <= Math.floor(400 * 0.35), `low-quality cap (${lo.length})`);
+    assert.ok(lo.length < hi.length, 'density scale thins the layer');
+    assert.deepEqual(planDecorations(null, 1337, 0, 1), [], 'zero cap plans nothing');
+  });
+
+  it('decorations are rarer in dungeon/volcano zones', () => {
+    // Uncapped so the zone multiplier itself is compared, not the cap.
+    const meadow = planDecorations(stubTerrain('meadow'), 1337, 5000, 1);
+    const dungeon = planDecorations(stubTerrain('dungeon'), 1337, 5000, 1);
+    const volcano = planDecorations(stubTerrain('volcano'), 1337, 5000, 1);
+    assert.ok(dungeon.length < meadow.length, `dungeon ${dungeon.length} < meadow ${meadow.length}`);
+    assert.ok(volcano.length < meadow.length, `volcano ${volcano.length} < meadow ${meadow.length}`);
+  });
+
+  it('tileShade is stable, bounded and two-tone', () => {
+    assert.equal(tileShade(7, 9, 1337), tileShade(7, 9, 1337));
+    let even = 0;
+    let odd = 0;
+    let n = 0;
+    for (let y = 0; y < 20; y++) {
+      for (let x = 0; x < 20; x++) {
+        const s = tileShade(x, y, 1337);
+        assert.ok(s > 0.8 && s < 1.1, `shade ${s} in range`);
+        if ((x + y) % 2 === 0) even += s;
+        else odd += s;
+        n++;
+      }
+    }
+    assert.ok(even / (n / 2) > odd / (n / 2), 'checker bright/dark split survives the noise');
+  });
+
+  it('hash2i is deterministic in [0,1) and avatar variants follow kind+name', () => {
+    assert.equal(hash2i(3, 4, 1337), hash2i(3, 4, 1337));
+    assert.ok(hash2i(3, 4, 1337) >= 0 && hash2i(3, 4, 1337) < 1);
+    assert.equal(avatarVariant('npc', 'Elder Maren'), 'hat-staff');
+    assert.equal(avatarVariant('npc', 'shopkeep'), 'staff');
+    assert.equal(avatarVariant('player', 'hero'), 'sword');
+    assert.equal(avatarVariant('mob', 'gloom'), 'sword');
+    assert.equal(avatarVariant('pickup', 'shard'), 'none');
+    assert.equal(avatarVariant('projectile', 'bolt'), 'none');
+  });
+});
+
+describe('combat-feel pools (scene_art)', () => {
+  it('death bursts spawn 8 particles with gravity and fade out', () => {
+    const pool = new BurstPool(32);
+    assert.equal(pool.alive(), 0);
+    pool.burst(50, 1, 50, 0xffd27f, 8);
+    assert.equal(pool.alive(), 8);
+    for (let i = 0; i < 40; i++) pool.update(0.05);
+    assert.equal(pool.alive(), 0, 'all burst particles decay');
+  });
+
+  it('level-up beam triggers, fades and hides', () => {
+    const beam = createLevelBeam();
+    assert.equal(beam.visible, false);
+    triggerLevelBeam(beam, 50, 0, 50);
+    assert.equal(beam.visible, true);
+    for (let i = 0; i < 30; i++) updateLevelBeam(beam, 0.05);
+    assert.equal(beam.visible, false);
+  });
+
+  it('procedural textures resolve headless (stub-DOM safe)', () => {
+    assert.ok(blobShadowTexture());
+    assert.ok(glowTexture());
+    assert.ok(tileEdgeTexture());
   });
 });

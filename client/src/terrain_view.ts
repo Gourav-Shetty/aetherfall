@@ -23,9 +23,13 @@ import {
   LAVA_LEVEL,
   LandmarkIndex,
   WATER_LEVEL,
+  getBiome,
+  getZone,
   hazardAt,
   heightAt,
+  type Biome,
   type Landmark,
+  type ZoneId,
 } from '@aetherfall/engine';
 
 /** Water surface height (world units) — mirrors the engine field. */
@@ -152,6 +156,29 @@ export class TerrainView implements TerrainMapLike {
   /** Hazard at a world position (engine, uncached). */
   hazardAt(x: number, y: number): { type: 'none' | 'water' | 'lava'; dps: number; depth: number } {
     return hazardAt(x, y, this.seed);
+  }
+
+  /**
+   * Biome / zone presentation helpers (ADDITIVE art pass — no gameplay use).
+   * Pure engine samples at the tile centre, so avatars, tiles and decorations
+   * agree about the local look without touching the cached grid.
+   */
+  biomeAt(x: number, y: number): Biome {
+    return getBiome(x, y, this.seed);
+  }
+
+  zoneAt(x: number, y: number): ZoneId {
+    return getZone(x, y, this.seed);
+  }
+
+  /** Biome of a tile centre (for tile tinting + decoration rules). */
+  biomeAtTile(tx: number, ty: number): Biome {
+    return getBiome(tx + 0.5, ty + 0.5, this.seed);
+  }
+
+  /** Overworld zone of a tile centre (meadow / dungeon / volcano). */
+  zoneAtTile(tx: number, ty: number): ZoneId {
+    return getZone(tx + 0.5, ty + 0.5, this.seed);
   }
 
   /**

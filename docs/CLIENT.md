@@ -272,7 +272,7 @@ yet produced; the snapshot fallback is what keeps the kill feed and the
 ## Tests
 
 `npm run test --workspace=@aetherfall/client` compiles the DOM-free modules to
-`dist-test/` and runs them under `node --test` (359 tests, 0 failing). Covered: entity interpolation
+`dist-test/` and runs them under `node --test` (382 tests, 0 failing). Covered: entity interpolation
 and client-side prediction (pre-existing), plus the new UI logic — fog chunk
 keying / radius / `sessionStorage` round-trip and corrupt-storage recovery,
 the quest chain tracker (ordering, authoritative-vs-fallback precedence, goal
@@ -293,7 +293,68 @@ every `kind` the server can emit as handled-or-deliberately-ignored so a new
 server event fails the build until the client routes it. Renderer, DOM, and
 WebGL paths stay covered by `npm run build` (typecheck) and manual QA.
 
+## Stylized low-poly art pass (procedural, no assets)
+
+Torchlight-like look from three.js primitives + canvas textures only —
+`client/src/scene_art.ts` (helpers) wired into `client/src/renderer3d.ts`;
+`terrain_view.ts` only gained additive `biomeAt(Tile)` / `zoneAt(Tile)`
+presentation samplers. No new deps, assets, or build steps.
+
+- **Avatars.** Box bodies are gone: tapered 6-sided cylinder body in class
+  colour, low-poly sphere head with a dark visor band, team-coloured base
+  disc, sword (players/mobs) or staff (NPCs), cone wizard hat for Maren-type
+  names (`/maren/i`). Walk bob (`sin` stride) + lean into movement velocity,
+  blob shadow (shared radial texture on a flat plane that stays on the floor
+  while the body bobs). Pickups bob + spin with an additive glow sprite;
+  projectiles pulse with an additive tracer glow + pooled ember trail.
+  Geometries are module singletons; only the per-instance colours are fresh
+  materials. Disposal frees per-avatar materials but never the shared geos.
+- **Tiles.** Two-tone checker × seeded brightness noise (`tileShade`, stable
+  per tile) over an edge-facet canvas texture, lerped 32 % toward the biome
+  tint (`plains` neutral, `forest` green, `desert`/`beach` sand, `mountain`
+  grey, `snow` white), then the existing cliff-rock / snow-altitude cues.
+  Water shimmers (`opacity 0.68 ± 0.10` at 2.1 rad/s); lava pulses its
+  Lambert emissive (`0.65 + pulse × 0.5`) and arms one flickering PointLight
+  that follows the local player only while a lava tile is within 7 m
+  (checked at 2.5 Hz, flicker from two detuned sines).
+- **Decorations.** Deterministic scatter (`planDecorations`, seeded per tile):
+  grass tufts (crossed planes), trees (cone foliage + cylinder trunk) and
+  rocks (dodecahedra), skipped on hazards / walls / cliffs, rarer in
+  `dungeon` (×0.3) / `volcano` (×0.22) with per-biome adjustments, capped at
+  400 items across 4 instanced meshes (1 draw call each). Same seed + terrain
+  always yields the same matrices (pinned headless).
+- **Sky/lighting.** Gradient sky dome (BackSide sphere, per-vertex colours,
+  top colour lerps day/night, follows the camera target), warm sun-disc
+  sprite (dawn amber → noon white, opacity tracks daylight), hemisphere
+  ground colour set to the biome-averaged ground tone at build, 220
+  deterministic stars (Points, opacity = night factor, hidden by day), soft
+  additive outer glow on every telegraph ring.
+- **Combat feel.** Deaths pop an 8-particle pooled burst (gravity, additive
+  fade, 1 draw call for the whole pool — removals auto-burst, plus a public
+  `deathBurst()`); `levelUp(x, y)` fires a reusable additive cylinder beam
+  (1.2 s fade + spin, hidden when idle).
+- **Perf contract.** Steady-state base scene is 10 draw calls by day
+  (ground, walls, water, 4 decor, sky, sun + stars at night; lava/landmarks
+  only when present; burst pool + level beam hidden when idle) — ≤ 12. Avatars,
+  flashes and telegraphs are transient per-entity extras. The frame loop
+  reuses scratch colours/vectors/sets and splices backwards (no per-frame
+  `new`); `setQuality()` derives decor density from the pixel-ratio cap
+  (1→0.35, 1.5→0.7, 2→1.0, optional override) and scales the burst pool.
+  Fog-of-war still retints ground, walls, hazards **and** decorations at
+  2 Hz. Auto-fallback to Canvas2D is untouched, as is the Canvas2D look.
+- **Tests.** `IsoRenderer.createHeadless()` (stub renderer, no WebGL) lets
+  the suite pin: no-throw updates, child-count stability across frames,
+  exactly-one-child-freed removals, `baseDrawCalls() <= 12`, quality
+  scaling, fog-pass stability, and decoration determinism. Full client
+  suite green (see Tests above).
+
 ## Perf notes
+
+- Terrain + art: ≤ 12 steady-state base draw calls (ground, walls, water,
+  lava, 4 decoration layers, sky, stars at night, sun — lava/landmarks only
+  when in range, burst pool + level beam hidden when idle);
+  avatars are a few dozen shared-geometry meshes; `pixelRatio` capped by quality
+  (low 1 / med 1.5 / high 2).
 
 - Terrain: 4-5 instanced draw calls regardless of arena size (ground, walls,
   water, lava, landmarks — the last one only when something is in range);

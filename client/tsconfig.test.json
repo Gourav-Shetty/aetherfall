@@ -44,6 +44,8 @@
     "src/panels.test.ts",
     "src/terrain_view.ts",
     "src/terrain_view.test.ts",
+    "src/scene_art.ts",
+    "src/renderer3d.ts",
     "src/hud.ts",
     "src/renderer2d.ts",
     "src/polish.test.ts"

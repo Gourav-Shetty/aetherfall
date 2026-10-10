@@ -12,6 +12,36 @@ import {
   zVisual,
   type TerrainView,
 } from './terrain_view.js';
+import {
+  BurstPool,
+  DECOR_CAP,
+  averageGroundColor,
+  animateAvatar,
+  avatarVariant,
+  biomeTint,
+  blobShadowTexture,
+  createAvatar,
+  createLevelBeam,
+  createSkyDome,
+  createStars,
+  createSunSprite,
+  createTelegraphGlow,
+  decorMatrices,
+  glowTexture,
+  hash2i,
+  planDecorations,
+  sharedGeos,
+  tileEdgeTexture,
+  tileShade,
+  triggerLevelBeam,
+  updateLevelBeam,
+  updateSkyDome,
+  updateStars,
+  updateSun,
+  zoneDensity,
+  type AvatarRefs,
+  type DecorItem,
+} from './scene_art.js';
 
 const ARENA = 100;
 const ISO_OFF = 30;
@@ -43,13 +73,15 @@ const HAZARD_SURFACE: Record<number, number> = {
 };
 
 interface Body {
-  g: THREE.Group;
-  fg: THREE.Sprite;
-  mat: THREE.MeshLambertMaterial;
+  refs: AvatarRefs;
   baseColor: number;
+  teamColor: number;
   isLocal: boolean;
   /** Snapshot kind, so a palette switch can re-tint live bodies. */
   kind: string;
+  name: string;
+  lastBX: number;
+  lastBZ: number;
 }
 interface Flash { m: THREE.Mesh<THREE.RingGeometry, THREE.MeshBasicMaterial>; life: number; max: number; }
 interface TeleRing { g: THREE.Group; x: number; y: number; r: number; t0: number; ttl: number; }
@@ -69,16 +101,20 @@ export interface FogLike {
 /**
  * Isometric 2.5D renderer (Three.js, orthographic dimetric camera).
  *
- * Terrain is 4-5 draw calls (instanced ground + instanced walls + instanced
- * water + instanced lava + instanced landmark pillars, the last hidden when
- * empty); avatars are a handful of meshes. Returns null from tryCreate when
- * WebGL is missing.
+ * Stylized low-poly pass (procedural, no assets): grouped characters with
+ * walk bob + lean + blob shadows, two-tone biome-tinted tiles with edge
+ * facets, an instanced decoration layer, gradient sky + stars + sun sprite,
+ * water shimmer / lava pulse + flicker light, and pooled combat particles.
+ *
+ * Steady-state base scene is <= 12 draw calls: ground, walls, water, lava,
+ * 4 decoration meshes, sky, stars (night only), sun, plus the pooled burst
+ * Points and the level beam (both hidden when idle). Avatars, flashes and
+ * telegraph rings are transient per-entity extras with shared geometries.
  *
  * With a TerrainView attached (the normal path, see main.ts) every ground tile
  * is lifted to its `heightAt()` elevation, tilted along its gradient, tinted by
- * elevation / slope / hazard, and every avatar stands at the ground height of
- * the tile under it — so the server's authoritative elevation is what the
- * player sees. The renderer still works (flat arena) without one.
+ * elevation / slope / hazard / biome, and every avatar stands at the ground
+ * height of the tile under it. The renderer still works (flat arena) without one.
  */
 export class IsoRenderer {
   private renderer: THREE.WebGLRenderer;
@@ -107,6 +143,7 @@ export class IsoRenderer {
   private ground!: THREE.InstancedMesh;
   private wall!: THREE.InstancedMesh;
   private wallPos: Array<[number, number]> = [];
+  private wallSet = new Set<string>();
   /** Un-fogged ground RGB per tile (3 floats each) so tinting is reversible. */
   private baseGround = new Float32Array(ARENA * ARENA * 3);
   /** Instanced hazard surfaces (1 draw call each) + their per-instance RGB. */
@@ -135,12 +172,51 @@ export class IsoRenderer {
   /** Telegraph ring + disc colours (override via setTelegraphColor). */
   private teleRing = 0xff3b3b;
   private teleDisc = 0xff2828;
+  // ---- stylized-art layer (scene_art.ts) ----
+  private sky: THREE.Mesh | null = null;
+  private stars: THREE.Points | null = null;
+  private sunSprite: THREE.Sprite | null = null;
+  private lavaLight: THREE.PointLight | null = null;
+  private bursts: BurstPool | null = null;
+  private beam: THREE.Mesh | null = null;
+  private lastSkyUpdate = 0;
+  private decorDensity = 1;
+  private decorPlan: DecorItem[] = [];
+  private grassMesh: THREE.InstancedMesh | null = null;
+  private foliageMesh: THREE.InstancedMesh | null = null;
+  private trunkMesh: THREE.InstancedMesh | null = null;
+  private rockMesh: THREE.InstancedMesh | null = null;
+  private grassBase: Float32Array = new Float32Array(0);
+  private foliageBase: Float32Array = new Float32Array(0);
+  private trunkBase: Float32Array = new Float32Array(0);
+  private rockBase: Float32Array = new Float32Array(0);
+  private grassPos: Array<[number, number]> = [];
+  private foliagePos: Array<[number, number]> = [];
+  private rockPos: Array<[number, number]> = [];
+  // ---- frame-loop scratch (no per-frame allocation) ----
+  private scratchColor = new THREE.Color();
+  private scratchColor2 = new THREE.Color();
+  private scratchColor3 = new THREE.Color();
+  private scratchObj = new THREE.Object3D();
+  private scratchVec = new THREE.Vector3();
+  private scratchVec2 = new THREE.Vector2();
+  private scratchRay = new THREE.Raycaster();
+  private scratchUp = new THREE.Vector3(0, 1, 0);
+  private scratchPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+  private scratchOut = new THREE.Vector3();
+  private aliveSet = new Set<number>();
+  private removeIds: number[] = [];
+  private sunWarm = new THREE.Color(0xffb36b);
+  private sunNoon = new THREE.Color(0xfff3d6);
+  private lavaNearCheckedAt = 0;
+  private lavaNear = false;
+  private hasGround = false;
 
   private constructor(private container: HTMLElement, renderer: THREE.WebGLRenderer) {
     this.renderer = renderer;
     const w = container.clientWidth || 960, h = container.clientHeight || 600;
     const view = this.viewDist, aspect = w / h;
-    this.camera = new THREE.OrthographicCamera((-view * aspect) / 2, (view * aspect) / 2, view / 2, -view / 2, 0.1, 300);
+    this.camera = new THREE.OrthographicCamera((-view * aspect) / 2, (view * aspect) / 2, view / 2, -view / 2, 0.1, 400);
     this.sun = new THREE.DirectionalLight(0xfff2d9, 1.2);
     this.sun.position.set(40, 60, 20);
     this.amb = new THREE.AmbientLight(0xffffff, 0.7);
@@ -150,20 +226,35 @@ export class IsoRenderer {
     // Atmospheric distance haze for far geometry (fog-of-war terrain tinting
     // is a separate, exact per-chunk pass — see setFog()/applyFog()).
     this.scene.fog = new THREE.Fog(0x0b1026, 55, 90);
+    // Lava flicker light: single PointLight, enabled only near lava.
+    this.lavaLight = new THREE.PointLight(0xff6a1e, 0, 14, 1.8);
+    this.lavaLight.visible = false;
+    this.scene.add(this.lavaLight);
     this.buildTerrain();
+    this.buildSkyLayer();
     this.resize();
-    window.addEventListener('resize', this.onResize);
-    const el = renderer.domElement;
-    el.style.position = 'absolute'; el.style.inset = '0';
-    el.style.width = '100%'; el.style.height = '100%';
+    try {
+      if (typeof window !== 'undefined') window.addEventListener('resize', this.onResize);
+    } catch { /* ignore */ }
+    try {
+      const el = renderer.domElement as unknown as { style?: Record<string, string> };
+      if (el.style !== undefined) {
+        el.style.position = 'absolute'; el.style.inset = '0';
+        el.style.width = '100%'; el.style.height = '100%';
+      }
+    } catch { /* ignore */ }
   }
 
   static tryCreate(container: HTMLElement, terrain: TerrainView | null = null): IsoRenderer | null {
     try {
-      const probe = document.createElement('canvas');
-      if (!probe.getContext('webgl2') && !probe.getContext('webgl')) return null;
+      const doc = (globalThis as unknown as { document?: Document }).document;
+      if (!doc) return null;
+      const probe = doc.createElement('canvas');
+      const ctx = probe.getContext('webgl2') ?? probe.getContext('webgl');
+      if (!ctx) return null;
+      const g = globalThis as unknown as { window?: { devicePixelRatio?: number } };
       const renderer = new THREE.WebGLRenderer({ antialias: true });
-      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+      renderer.setPixelRatio(Math.min(g.window?.devicePixelRatio ?? 1, 2));
       container.appendChild(renderer.domElement);
       const iso = new IsoRenderer(container, renderer);
       if (terrain !== null) iso.setTerrain(terrain);
@@ -173,7 +264,26 @@ export class IsoRenderer {
     }
   }
 
-  get element(): HTMLElement { return this.renderer.domElement; }
+  /**
+   * Headless constructor for node tests: no WebGL, no window. Uses a stub
+   * renderer whose render() is a no-op, so update() exercises the whole
+   * scene graph (child-count stability, determinism) without a GPU.
+   */
+  static createHeadless(container: HTMLElement, terrain: TerrainView | null = null): IsoRenderer {
+    const stubCanvas = { style: {} as Record<string, string>, remove: () => {} };
+    const stub = {
+      domElement: stubCanvas,
+      setPixelRatio: (_n: number) => {},
+      setSize: (_w: number, _h: number, _u?: boolean) => {},
+      render: (_s: unknown, _c: unknown) => {},
+      dispose: () => {},
+    } as unknown as THREE.WebGLRenderer;
+    const iso = new IsoRenderer(container, stub);
+    if (terrain !== null) iso.setTerrain(terrain);
+    return iso;
+  }
+
+  get element(): HTMLElement { return this.renderer.domElement as unknown as HTMLElement; }
 
   /** Render-distance hook: ortho view size 15..50 (larger = more visible). */
   setViewDistance(v: number) {
@@ -181,31 +291,96 @@ export class IsoRenderer {
     this.resize();
   }
 
-  /** Quality hook: pixel-ratio cap + flash-particle cap. */
-  setQuality(pixelRatioCap: number, maxFlashes: number) {
+  /**
+   * Quality hook: pixel-ratio cap + flash-particle cap. Decoration density
+   * and burst particles scale from the same knob (low ~1/0.35, med ~1.5/0.7,
+   * high ~2/1.0); pass an explicit decorDensity to override.
+   */
+  setQuality(pixelRatioCap: number, maxFlashes: number, decorDensity?: number) {
     this.maxFlashes = Math.max(0, Math.min(200, Math.floor(maxFlashes)));
     try {
-      this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, pixelRatioCap));
+      const g = globalThis as unknown as { window?: { devicePixelRatio?: number } };
+      this.renderer.setPixelRatio(Math.min(g.window?.devicePixelRatio ?? 1, pixelRatioCap));
     } catch {
       /* ignore */
+    }
+    const derived = pixelRatioCap <= 1 ? 0.35 : pixelRatioCap <= 1.5 ? 0.7 : 1;
+    const want = decorDensity === undefined ? derived : Math.max(0.1, Math.min(1, decorDensity));
+    if (Math.abs(want - this.decorDensity) > 1e-6) {
+      this.decorDensity = want;
+      this.bursts?.setQualityScale(want);
+      this.buildDecorations();
+    } else {
+      this.bursts?.setQualityScale(this.decorDensity);
     }
   }
 
   /** Remove the WebGL canvas + free GPU resources (for Canvas2D fallback). */
   dispose() {
     try {
-      window.removeEventListener('resize', this.onResize);
-      this.scene.traverse((o) => {
-        const mesh = o as THREE.Mesh;
-        if (mesh.isMesh) {
-          mesh.geometry?.dispose?.();
-          const m = mesh.material as THREE.Material | THREE.Material[] | undefined;
-          if (Array.isArray(m)) m.forEach((x) => x.dispose());
-          else m?.dispose();
-        }
-      });
+      try {
+        if (typeof window !== 'undefined') window.removeEventListener('resize', this.onResize);
+      } catch { /* ignore */ }
+      // Bodies: dispose per-instance materials only (geometries are shared).
+      for (const b of this.bodies.values()) this.disposeBody(b);
+      this.bodies.clear();
+      // Transient fx own their geometries.
+      for (const f of this.flashes) {
+        this.scene.remove(f.m);
+        f.m.geometry.dispose();
+        (f.m.material as THREE.Material).dispose();
+      }
+      this.flashes.length = 0;
+      for (const t of this.tele) {
+        this.scene.remove(t.g);
+        t.g.traverse((o) => {
+          const mesh = o as THREE.Mesh;
+          if ((mesh as unknown as { isMesh?: boolean }).isMesh) {
+            mesh.geometry.dispose();
+            (mesh.material as THREE.Material)?.dispose();
+          }
+        });
+      }
+      this.tele.length = 0;
+      this.clearHazards();
+      this.clearTerrainMeshes();
+      this.clearDecorations();
+      if (this.sky !== null) {
+        this.scene.remove(this.sky);
+        this.sky.geometry.dispose();
+        ((this.sky.material as THREE.Material)).dispose();
+        this.sky = null;
+      }
+      if (this.stars !== null) {
+        this.scene.remove(this.stars);
+        this.stars.geometry.dispose();
+        ((this.stars.material as THREE.Material)).dispose();
+        this.stars = null;
+      }
+      if (this.sunSprite !== null) {
+        this.scene.remove(this.sunSprite);
+        ((this.sunSprite.material as THREE.Material)).dispose();
+        this.sunSprite = null;
+      }
+      if (this.bursts !== null) {
+        this.scene.remove(this.bursts.points);
+        this.bursts.points.geometry.dispose();
+        ((this.bursts.points.material as THREE.Material)).dispose();
+        this.bursts = null;
+      }
+      if (this.beam !== null) {
+        this.scene.remove(this.beam);
+        ((this.beam.material as THREE.Material)).dispose();
+        this.beam = null;
+      }
+      if (this.lavaLight !== null) {
+        this.scene.remove(this.lavaLight);
+        this.lavaLight = null;
+      }
       this.renderer.dispose();
-      this.renderer.domElement.remove();
+      try {
+        (this.renderer.domElement as unknown as { remove?: () => void }).remove?.();
+      } catch { /* ignore */ }
     } catch {
       /* ignore */
     }
@@ -217,7 +392,9 @@ export class IsoRenderer {
     this.camera.left = (-view * aspect) / 2; this.camera.right = (view * aspect) / 2;
     this.camera.top = view / 2; this.camera.bottom = -view / 2;
     this.camera.updateProjectionMatrix();
-    this.renderer.setSize(w, h, false);
+    try {
+      this.renderer.setSize(w, h, false);
+    } catch { /* ignore */ }
   }
 
   /**
@@ -243,6 +420,71 @@ export class IsoRenderer {
     this.water = null;
     this.lava = null;
     this.landmarks = null;
+    this.waterPos = [];
+    this.lavaPos = [];
+  }
+
+  private clearTerrainMeshes(): void {
+    if (this.hasGround) {
+      try {
+        this.scene.remove(this.ground);
+        this.ground.geometry.dispose();
+        (this.ground.material as THREE.Material).dispose();
+      } catch { /* ignore */ }
+      try {
+        this.scene.remove(this.wall);
+        this.wall.geometry.dispose();
+        (this.wall.material as THREE.Material).dispose();
+      } catch { /* ignore */ }
+      this.hasGround = false;
+    }
+    this.wallPos = [];
+    this.wallSet.clear();
+  }
+
+  private clearDecorations(): void {
+    for (const mesh of [this.grassMesh, this.foliageMesh, this.trunkMesh, this.rockMesh]) {
+      if (!mesh) continue;
+      this.scene.remove(mesh);
+      // Geometries are shared singletons — dispose the material only.
+      (mesh.material as THREE.Material).dispose();
+    }
+    this.grassMesh = null;
+    this.foliageMesh = null;
+    this.trunkMesh = null;
+    this.rockMesh = null;
+    this.grassBase = new Float32Array(0);
+    this.foliageBase = new Float32Array(0);
+    this.trunkBase = new Float32Array(0);
+    this.rockBase = new Float32Array(0);
+    this.grassPos = [];
+    this.foliagePos = [];
+    this.rockPos = [];
+  }
+
+  /** Sky dome + stars + sun sprite + pooled bursts + level beam (once). */
+  private buildSkyLayer(): void {
+    if (this.sky === null) {
+      this.sky = createSkyDome(150);
+      this.scene.add(this.sky);
+    }
+    if (this.stars === null) {
+      this.stars = createStars(220, 130);
+      this.scene.add(this.stars);
+    }
+    if (this.sunSprite === null) {
+      this.sunSprite = createSunSprite();
+      this.scene.add(this.sunSprite);
+    }
+    if (this.bursts === null) {
+      this.bursts = new BurstPool(256);
+      this.bursts.setQualityScale(this.decorDensity);
+      this.scene.add(this.bursts.points);
+    }
+    if (this.beam === null) {
+      this.beam = createLevelBeam();
+      this.scene.add(this.beam);
+    }
   }
 
   /**
@@ -250,28 +492,37 @@ export class IsoRenderer {
    *
    * With terrain: every tile is placed at `zVisual(heightAt)`, rotated so its
    * plane follows the local gradient, and coloured from elevation (snow line),
-   * slope (cliff rock) and hazard. Hazard tiles additionally get an instanced
-   * surface quad at the water or lava level — the only new draw calls, two in
-   * total, so terrain stays at 4-5.
+   * slope (cliff rock), hazard and biome (two-tone checker + seeded noise +
+   * biome tint over an edge-facet texture). Hazard tiles additionally get an
+   * instanced surface quad at the water or lava level.
    */
   private buildTerrain() {
     this.clearHazards();
+    this.clearTerrainMeshes();
+    this.clearDecorations();
     const tiles = new ChunkCache();
     const rand = mulberry32(1337);
-    const dummy = new THREE.Object3D();
+    const dummy = this.scratchObj;
     const up = new THREE.Vector3(0, 1, 0);
     const nrm = new THREE.Vector3();
     const flat = new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0));
     const tv = this.terrain;
+    const seed = tv?.seed ?? 1337;
     const ground = new THREE.InstancedMesh(
-      new THREE.PlaneGeometry(1, 1), new THREE.MeshLambertMaterial({ color: 0xffffff }), ARENA * ARENA);
+      new THREE.PlaneGeometry(1, 1),
+      new THREE.MeshLambertMaterial({ color: 0xffffff, map: tileEdgeTexture() }),
+      ARENA * ARENA);
     const wallPos: Array<[number, number, number]> = [];
     const waterPos: Array<[number, number, number]> = [];
     const lavaPos: Array<[number, number, number]> = [];
-    const c = new THREE.Color();
-    const snow = new THREE.Color(SNOW_COLOR);
+    const c = this.scratchColor;
+    const snow = this.scratchColor2;
+    const biomeScratch = this.scratchColor3;
     const cliff = new THREE.Color(CLIFF_COLOR);
+    snow.set(SNOW_COLOR);
     let gi = 0;
+    // Track the wall-tile set so decorations never sprout inside walls.
+    const wallKeys = new Set<string>();
     for (let y = 0; y < ARENA; y++) {
       for (let x = 0; x < ARENA; x++) {
         const t = tiles.tile(x, y);
@@ -281,6 +532,7 @@ export class IsoRenderer {
         let gy = 0;
         let kind = TERR_NONE;
         let height = 0;
+        let biome = 'plains';
         if (tv !== null) {
           height = tv.heightAtTile(x, y);
           kind = tv.kindAtTile(x, y);
@@ -289,6 +541,9 @@ export class IsoRenderer {
           const g = tv.gradientFromGrid(x, y);
           gx = g.gx;
           gy = g.gy;
+          try {
+            biome = tv.biomeAtTile(x, y);
+          } catch { biome = 'plains'; }
         }
         dummy.position.set(x + 0.5, gz, y + 0.5);
         if (tv !== null && slope > 0.02) {
@@ -298,6 +553,7 @@ export class IsoRenderer {
         } else {
           dummy.quaternion.copy(flat);
         }
+        dummy.scale.set(1, 1, 1);
         dummy.updateMatrix();
         ground.setMatrixAt(gi, dummy.matrix);
         if (kind !== TERR_NONE) {
@@ -307,25 +563,36 @@ export class IsoRenderer {
         } else if (t === 1) {
           c.set(CLIFF_COLOR).offsetHSL(0, 0, (rand() - 0.5) * 0.06);
         } else {
-          c.set((x + y) % 2 === 0 ? 0x4a8f4d : 0x439047).offsetHSL(0, 0, (rand() - 0.5) * 0.05);
+          // Stylized base: two-tone checker + seeded brightness noise, then
+          // biome tint, cliff rock and snow altitude cues.
+          c.set((x + y) % 2 === 0 ? 0x4a8f4d : 0x439047);
+          c.multiplyScalar(tileShade(x, y, seed));
+          biomeScratch.setHex(biomeTint(biome));
+          c.lerp(biomeScratch, 0.32);
           if (tv !== null) {
             // Steep ground reads as rock, high ground as snow.
             if (slope > TERRAIN_CLIFF_SLOPE) c.lerp(cliff, Math.min(1, (slope - TERRAIN_CLIFF_SLOPE) / 2));
             const alt = Math.max(0, Math.min(1, (height - 18) / 22));
             if (alt > 0) c.lerp(snow, alt * 0.8);
+          } else {
+            c.offsetHSL(0, 0, (rand() - 0.5) * 0.02);
           }
         }
         ground.setColorAt(gi, c);
         const b = gi * 3;
         this.baseGround[b] = c.r; this.baseGround[b + 1] = c.g; this.baseGround[b + 2] = c.b;
         gi++;
-        if (t === 1) wallPos.push([x, y, gz]);
+        if (t === 1) {
+          wallPos.push([x, y, gz]);
+          wallKeys.add(x + ',' + y);
+        }
       }
     }
     ground.instanceMatrix.needsUpdate = true;
     if (ground.instanceColor) ground.instanceColor.needsUpdate = true;
     this.scene.add(ground);
     this.ground = ground;
+    this.hasGround = true;
 
     const walls = new THREE.InstancedMesh(
       new THREE.BoxGeometry(1, 1, 1), new THREE.MeshLambertMaterial({ color: 0x8b93a3 }), Math.max(1, wallPos.length));
@@ -334,6 +601,7 @@ export class IsoRenderer {
       // Walls ride the terrain height so a cliff edge still lines up.
       d2.position.set(x + 0.5, gz + 0.5, y + 0.5);
       d2.rotation.set(0, 0, 0);
+      d2.scale.set(1, 1, 1);
       d2.updateMatrix();
       walls.setMatrixAt(i, d2.matrix);
       // Per-instance color so fog can dim walls like the ground.
@@ -345,14 +613,147 @@ export class IsoRenderer {
     this.scene.add(walls);
     this.wall = walls;
     this.wallPos = wallPos.map(([x, y]) => [x, y] as [number, number]);
+    this.wallSet = wallKeys;
 
     this.water = this.buildHazardSurface(waterPos, this.waterBase, TERR_WATER, 0.74);
     this.waterPos = waterPos;
     this.lava = this.buildHazardSurface(lavaPos, this.lavaBase, TERR_LAVA, 1);
     this.lavaPos = lavaPos;
     if (tv !== null) this.buildLandmarks();
+    // Hemisphere ground follows the biome-averaged ground tone.
+    try {
+      const [r, g, b] = averageGroundColor(this.baseGround);
+      this.hemi.groundColor.setRGB(r, g, b);
+    } catch { /* ignore */ }
     // A rebuild invalidates every cached fog tier.
     this.groundTier.fill(-1);
+    this.buildDecorations();
+  }
+
+  /**
+   * Instanced decoration layer: grass tufts (crossed planes), trees
+   * (cone foliage + cylinder trunk) and rocks (dodecahedra), scattered
+   * deterministically per tile and capped at ~400 items. One draw call per
+   * mesh (4 total), rebuilt on terrain attach and on setQuality().
+   */
+  private buildDecorations(): void {
+    if (!this.hasGround) return;
+    this.clearDecorations();
+    const tv = this.terrain;
+    const seed = tv?.seed ?? 1337;
+    const isWall = (tx: number, ty: number): boolean => this.wallSet.has(tx + ',' + ty);
+    let plan: DecorItem[];
+    try {
+      plan = planDecorations(
+        tv !== null
+          ? {
+              kindAtTile: (x, y) => tv.kindAtTile(x, y),
+              heightAtTile: (x, y) => tv.heightAtTile(x, y),
+              slopeFromGrid: (x, y) => tv.slopeFromGrid(x, y),
+              biomeAtTile: (x, y) => tv.biomeAtTile(x, y),
+              zoneAtTile: (x, y) => tv.zoneAtTile(x, y),
+            }
+          : null,
+        seed,
+        DECOR_CAP,
+        this.decorDensity,
+        isWall,
+      );
+    } catch {
+      plan = [];
+    }
+    // Density knob path (tests): zoneDensity is consulted for documentation.
+    void zoneDensity;
+    this.decorPlan = plan;
+    if (plan.length === 0) return;
+    const G = sharedGeos();
+    const grassItems = plan.filter((d) => d.kind === 'grass');
+    const treeItems = plan.filter((d) => d.kind === 'tree');
+    const rockItems = plan.filter((d) => d.kind === 'rock');
+    const dummy = this.scratchObj;
+    const c = this.scratchColor;
+    if (grassItems.length > 0) {
+      const mat = new THREE.MeshLambertMaterial({ color: 0xffffff, side: THREE.DoubleSide });
+      const mesh = new THREE.InstancedMesh(G.grassBlade, mat, Math.max(1, grassItems.length * 2));
+      const base = new Float32Array(grassItems.length * 2 * 3);
+      let idx = 0;
+      for (const d of grassItems) {
+        for (let k = 0; k < 2; k++) {
+          dummy.position.set(d.x, d.z, d.y);
+          dummy.rotation.set(0, d.rotY + (k * Math.PI) / 2, 0);
+          dummy.scale.setScalar(d.scale);
+          dummy.updateMatrix();
+          mesh.setMatrixAt(idx, dummy.matrix);
+          c.setHex(d.tint);
+          mesh.setColorAt(idx, c);
+          base[idx * 3] = c.r; base[idx * 3 + 1] = c.g; base[idx * 3 + 2] = c.b;
+          this.grassPos.push([d.x, d.y]);
+          idx++;
+        }
+      }
+      mesh.count = idx;
+      mesh.instanceMatrix.needsUpdate = true;
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      this.scene.add(mesh);
+      this.grassMesh = mesh;
+      this.grassBase = base;
+    }
+    if (treeItems.length > 0) {
+      const folMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
+      const trunkMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
+      const fol = new THREE.InstancedMesh(G.treeFoliage, folMat, Math.max(1, treeItems.length));
+      const trunk = new THREE.InstancedMesh(G.treeTrunk, trunkMat, Math.max(1, treeItems.length));
+      const folBase = new Float32Array(treeItems.length * 3);
+      const trunkBase = new Float32Array(treeItems.length * 3);
+      treeItems.forEach((d, i) => {
+        dummy.position.set(d.x, d.z, d.y);
+        dummy.rotation.set(0, d.rotY, 0);
+        dummy.scale.setScalar(d.scale);
+        dummy.updateMatrix();
+        fol.setMatrixAt(i, dummy.matrix);
+        trunk.setMatrixAt(i, dummy.matrix);
+        c.setHex(d.tint);
+        fol.setColorAt(i, c);
+        folBase[i * 3] = c.r; folBase[i * 3 + 1] = c.g; folBase[i * 3 + 2] = c.b;
+        c.setHex(0x6b4a2e).offsetHSL(0, 0, ((d.tx + d.ty) % 5) * 0.008 - 0.016);
+        trunk.setColorAt(i, c);
+        trunkBase[i * 3] = c.r; trunkBase[i * 3 + 1] = c.g; trunkBase[i * 3 + 2] = c.b;
+        this.foliagePos.push([d.x, d.y]);
+      });
+      fol.instanceMatrix.needsUpdate = true;
+      trunk.instanceMatrix.needsUpdate = true;
+      if (fol.instanceColor) fol.instanceColor.needsUpdate = true;
+      if (trunk.instanceColor) trunk.instanceColor.needsUpdate = true;
+      this.scene.add(fol);
+      this.scene.add(trunk);
+      this.foliageMesh = fol;
+      this.trunkMesh = trunk;
+      this.foliageBase = folBase;
+      this.trunkBase = trunkBase;
+    }
+    if (rockItems.length > 0) {
+      const mat = new THREE.MeshLambertMaterial({ color: 0xffffff });
+      const mesh = new THREE.InstancedMesh(G.rock, mat, Math.max(1, rockItems.length));
+      const base = new Float32Array(rockItems.length * 3);
+      rockItems.forEach((d, i) => {
+        dummy.position.set(d.x, d.z + 0.15 * d.scale, d.y);
+        dummy.rotation.set(d.rotY * 0.3, d.rotY, 0);
+        dummy.scale.setScalar(d.scale);
+        dummy.updateMatrix();
+        mesh.setMatrixAt(i, dummy.matrix);
+        c.setHex(d.tint);
+        mesh.setColorAt(i, c);
+        base[i * 3] = c.r; base[i * 3 + 1] = c.g; base[i * 3 + 2] = c.b;
+        this.rockPos.push([d.x, d.y]);
+      });
+      mesh.instanceMatrix.needsUpdate = true;
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      this.scene.add(mesh);
+      this.rockMesh = mesh;
+      this.rockBase = base;
+    }
+    // New instances start fully lit; the throttled fog pass dims them.
+    this.lastFogApply = 0;
   }
 
   /**
@@ -371,11 +772,11 @@ export class IsoRenderer {
     const surfaceY = zVisual(kind === TERR_WATER ? TERRAIN_WATER_LEVEL : TERRAIN_LAVA_LEVEL);
     const mat = kind === TERR_WATER
       ? new THREE.MeshLambertMaterial({ color: 0xffffff, transparent: true, opacity, depthWrite: false })
-      : new THREE.MeshLambertMaterial({ color: 0xffffff });
+      : new THREE.MeshLambertMaterial({ color: 0xffffff, emissive: 0x531a08, emissiveIntensity: 0.7 });
     const mesh = new THREE.InstancedMesh(new THREE.PlaneGeometry(1, 1), mat, pos.length);
     const d = new THREE.Object3D();
     d.rotation.set(-Math.PI / 2, 0, 0);
-    const c = new THREE.Color();
+    const c = this.scratchColor;
     for (let i = 0; i < pos.length; i++) {
       const p = pos[i]!;
       d.position.set(p[0] + 0.5, surfaceY, p[1] + 0.5);
@@ -411,7 +812,7 @@ export class IsoRenderer {
       found.length,
     );
     const d = new THREE.Object3D();
-    const c = new THREE.Color();
+    const c = this.scratchColor;
     found.forEach((lm, i) => {
       const z = zVisual(tv.heightAtTile(lm.x, lm.y));
       const h = lm.kind === 'obelisk' ? 3.4 : lm.kind === 'ruin' ? 1.8 : 1.1;
@@ -449,16 +850,17 @@ export class IsoRenderer {
   }
 
   /**
-   * Retint terrain/wall instances for fog-of-war. Runs at most every 500ms and
-   * only rewrites an instance's color when its tier actually changed, so the
-   * steady-state cost is a 10k tier scan (~0.1ms) a couple of times a second.
+   * Retint terrain/wall/decoration instances for fog-of-war. Runs at most
+   * every 500ms and only rewrites an instance's color when its tier actually
+   * changed, so the steady-state cost is a 10k tier scan (~0.1ms) a couple of
+   * times a second.
    */
   private applyFog(nowMs: number): void {
     const fog = this.fog;
     if (!fog) return;
     if (nowMs - this.lastFogApply < 500) return;
     this.lastFogApply = nowMs;
-    const c = new THREE.Color();
+    const c = this.scratchColor;
     const dim = [FOG_LIT, FOG_MEMORY, FOG_UNKNOWN];
     const base = this.baseGround;
     for (let y = 0; y < ARENA; y++) {
@@ -484,6 +886,11 @@ export class IsoRenderer {
     // Hazard surfaces dim with the same three tiers.
     this.applyFogToSurface(this.water, this.waterPos, this.waterBase, dim);
     this.applyFogToSurface(this.lava, this.lavaPos, this.lavaBase, dim);
+    // Decorations dim with the same tiers (rewritten at 2Hz, ~400 instances).
+    this.applyFogToDecor(this.grassMesh, this.grassPos, this.grassBase, dim);
+    this.applyFogToDecor(this.foliageMesh, this.foliagePos, this.foliageBase, dim);
+    this.applyFogToDecor(this.trunkMesh, this.foliagePos, this.trunkBase, dim);
+    this.applyFogToDecor(this.rockMesh, this.rockPos, this.rockBase, dim);
   }
 
   /** Fog tint for one instanced hazard surface (no-op when absent). */
@@ -494,7 +901,7 @@ export class IsoRenderer {
     dim: number[],
   ): void {
     if (mesh === null) return;
-    const c = new THREE.Color();
+    const c = this.scratchColor;
     for (let i = 0; i < pos.length; i++) {
       const p = pos[i]!;
       const tier = this.fogTierAt(p[0] + 0.5, p[1] + 0.5);
@@ -505,39 +912,61 @@ export class IsoRenderer {
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
   }
 
-  private makeBody(e: DrawEntity): Body {
-    const g = new THREE.Group();
-    const baseColor = e.isLocal ? 0x59d98c : (this.bodyColors[e.kind] ?? 0xcccccc);
-    const mat = new THREE.MeshLambertMaterial({ color: baseColor });
-    if (e.isLocal) mat.emissive = new THREE.Color(0x0d3a1e);
-    let h = 1.1;
-    if (e.kind === 'pickup') h = 0.3;
-    else if (e.kind === 'projectile') h = 0.25;
-    const body = new THREE.Mesh(new THREE.BoxGeometry(e.kind === 'pickup' ? 0.5 : 0.8, h, e.kind === 'pickup' ? 0.5 : 0.8), mat);
-    body.position.y = h / 2;
-    g.add(body);
-    if (e.kind !== 'pickup' && e.kind !== 'projectile') {
-      const head = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.45, 0.45), new THREE.MeshLambertMaterial({ color: 0xf2c89b }));
-      head.position.y = h + 0.25;
-      g.add(head);
-      const bg = new THREE.Sprite(new THREE.SpriteMaterial({ color: 0x1a1214, depthTest: false }));
-      bg.scale.set(1.3, 0.16, 1);
-      bg.position.y = h + 0.85;
-      const fg = new THREE.Sprite(new THREE.SpriteMaterial({ color: 0x51ff7a, depthTest: false }));
-      fg.center.set(0, 0.5);
-      fg.scale.set(1.2, 0.12, 1);
-      fg.position.set(-0.6, h + 0.85, 0);
-      g.add(bg, fg);
-      g.position.set(e.x, 0, e.y);
-      this.scene.add(g);
-      return { g, fg, mat, baseColor, isLocal: e.isLocal, kind: e.kind };
+  /** Fog tint for one decoration layer (no-op when absent). */
+  private applyFogToDecor(
+    mesh: THREE.InstancedMesh | null,
+    pos: Array<[number, number]>,
+    base: Float32Array,
+    dim: number[],
+  ): void {
+    if (mesh === null || pos.length === 0) return;
+    const c = this.scratchColor;
+    const n = Math.min(pos.length, Math.floor(base.length / 3));
+    for (let i = 0; i < n; i++) {
+      const p = pos[i]!;
+      const tier = this.fogTierAt(p[0], p[1]);
+      const b = i * 3;
+      c.setRGB(base[b]!, base[b + 1]!, base[b + 2]!).multiplyScalar(dim[tier]!);
+      mesh.setColorAt(i, c);
     }
-    g.position.set(e.x, 0, e.y);
-    this.scene.add(g);
-    // Non-character entities share a dummy bar sprite (unused, zero scale).
-    const fg = new THREE.Sprite(new THREE.SpriteMaterial({ color: 0x51ff7a }));
-    fg.scale.set(0, 0, 1);
-    return { g, fg, mat, baseColor, isLocal: e.isLocal, kind: e.kind };
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+  }
+
+  private teamColorFor(e: DrawEntity): number {
+    if (e.isLocal) return 0x59d98c;
+    return this.bodyColors[e.kind] ?? 0xcccccc;
+  }
+
+  private makeBody(e: DrawEntity): Body {
+    const baseColor = e.isLocal ? 0x59d98c : (this.bodyColors[e.kind] ?? 0xcccccc);
+    const teamColor = this.teamColorFor(e);
+    const refs = createAvatar({
+      kind: e.kind,
+      name: e.name,
+      baseColor,
+      teamColor,
+      isLocal: e.isLocal,
+    });
+    refs.group.position.set(e.x, 0, e.y);
+    refs.lastX = e.x;
+    refs.lastZ = e.y;
+    // Deterministic bob phase so a crowd never pulses in sync.
+    refs.bobPhase = ((e.id * 2.39) % (Math.PI * 2));
+    this.scene.add(refs.group);
+    return { refs, baseColor, teamColor, isLocal: e.isLocal, kind: e.kind, name: e.name, lastBX: e.x, lastBZ: e.y };
+  }
+
+  /** Dispose per-instance avatar materials (shared geos/textures stay alive). */
+  private disposeBody(b: Body): void {
+    this.scene.remove(b.refs.group);
+    try {
+      b.refs.bodyMat.dispose();
+      b.refs.baseMat.dispose();
+      b.refs.headMat.dispose();
+      if (b.refs.hpBg !== null) (b.refs.hpBg.material as THREE.Material).dispose();
+      if (b.refs.hpFg !== null) (b.refs.hpFg.material as THREE.Material).dispose();
+      if (b.refs.glow !== null) (b.refs.glow.material as THREE.Material).dispose();
+    } catch { /* ignore */ }
   }
 
   /** Short-lived ring flash for attacks/hits (world x,y). Capped for perf. */
@@ -559,6 +988,20 @@ export class IsoRenderer {
     this.flashes.push({ m, life: 0.35, max: 0.35 });
   }
 
+  /** Death burst: 8 pooled particles with gravity + additive fade. */
+  deathBurst(x: number, y: number, color = 0xffd27f, z?: number) {
+    if (this.bursts === null) return;
+    const gz = (z ?? this.terrain?.tileHeightAt(x, y) ?? 0) * TERRAIN_Z_SCALE;
+    this.bursts.burst(x, gz, y, color, 8);
+  }
+
+  /** Level-up beam at a world position (reuses the single beam mesh). */
+  levelUp(x: number, y: number, z?: number) {
+    if (this.beam === null) return;
+    const gz = (z ?? this.terrain?.tileHeightAt(x, y) ?? 0) * TERRAIN_Z_SCALE;
+    triggerLevelBeam(this.beam, x, gz, y);
+  }
+
   /**
    * a11y: colourblind-safe entity colours (see PALETTES in a11y.ts, as
    * 0xrrggbb numbers). Non-finite values are ignored per entry. Live bodies
@@ -571,7 +1014,10 @@ export class IsoRenderer {
       const c = Math.floor(num) & 0xffffff;
       this.bodyColors[kind] = c;
       for (const b of this.bodies.values()) {
-        if (!b.isLocal && b.kind === kind) b.baseColor = c;
+        if (!b.isLocal && b.kind === kind) {
+          b.baseColor = c;
+          b.teamColor = c;
+        }
       }
     }
   }
@@ -593,7 +1039,7 @@ export class IsoRenderer {
     // Boss telegraph ring (`event/telegraph` from server/src/ai/npc.ts).
     // Expanding circle over ttlMs, then a flash when the hit lands. Colours
     // follow the a11y palette (see setTelegraphColor); the shipped reds are
-    // the defaults.
+    // the defaults. A soft additive outer glow rides along for readability.
     if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(r) || r <= 0) return;
     if (!Number.isFinite(ttlMs) || ttlMs <= 0) return;
     const rr = Math.min(30, r);
@@ -607,7 +1053,9 @@ export class IsoRenderer {
       new THREE.CircleGeometry(1.0, 40),
       new THREE.MeshBasicMaterial({ color: this.teleDisc, transparent: true, opacity: 0.1, side: THREE.DoubleSide, depthTest: false }));
     disc.rotation.x = -Math.PI / 2;
-    g.add(ring, disc);
+    const glow = createTelegraphGlow(this.teleRing);
+    glow.position.y = 0.01;
+    g.add(ring, disc, glow);
     g.position.set(x, (this.terrain?.tileHeightAt(x, y) ?? 0) * TERRAIN_Z_SCALE + 0.12, y);
     g.scale.setScalar(Math.max(0.05, rr * 0.15));
     this.scene.add(g);
@@ -618,7 +1066,7 @@ export class IsoRenderer {
         this.scene.remove(old.g);
         old.g.traverse((o) => {
           const mesh = o as THREE.Mesh;
-          if (mesh.isMesh) {
+          if ((mesh as unknown as { isMesh?: boolean }).isMesh) {
             mesh.geometry.dispose();
             (mesh.material as THREE.Material)?.dispose();
           }
@@ -637,21 +1085,28 @@ export class IsoRenderer {
   }
 
   project(x: number, y: number, z?: number): { sx: number; sy: number } {
-    const v = new THREE.Vector3(x, (z ?? 0) * TERRAIN_Z_SCALE + 1.6, y).project(this.camera);
+    const v = this.scratchOut;
+    v.set(x, (z ?? 0) * TERRAIN_Z_SCALE + 1.6, y).project(this.camera);
     const w = this.container.clientWidth || 960, h = this.container.clientHeight || 600;
     return { sx: ((v.x + 1) / 2) * w, sy: ((1 - v.y) / 2) * h };
   }
 
   screenToWorld(sx: number, sy: number): { x: number; y: number } {
-    const rect = this.renderer.domElement.getBoundingClientRect();
-    const nx = ((sx - rect.left) / Math.max(1, rect.width)) * 2 - 1;
-    const ny = -(((sy - rect.top) / Math.max(1, rect.height)) * 2 - 1);
-    const ray = new THREE.Raycaster();
-    ray.setFromCamera(new THREE.Vector2(nx, ny), this.camera);
-    const out = new THREE.Vector3();
-    if (ray.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), -this.groundY), out)) {
-      return { x: out.x, y: out.z };
-    }
+    try {
+      const rect = (this.renderer.domElement as unknown as {
+        getBoundingClientRect?: () => { left: number; top: number; width: number; height: number };
+      }).getBoundingClientRect?.();
+      if (!rect) return { x: this.target.x, y: this.target.z };
+      const nx = ((sx - rect.left) / Math.max(1, rect.width)) * 2 - 1;
+      const ny = -(((sy - rect.top) / Math.max(1, rect.height)) * 2 - 1);
+      this.scratchVec2.set(nx, ny);
+      this.scratchRay.setFromCamera(this.scratchVec2, this.camera);
+      this.scratchPlane.set(this.scratchUp, -this.groundY);
+      const out = this.scratchOut;
+      if (this.scratchRay.ray.intersectPlane(this.scratchPlane, out)) {
+        return { x: out.x, y: out.z };
+      }
+    } catch { /* ignore */ }
     return { x: this.target.x, y: this.target.z };
   }
 
@@ -662,12 +1117,44 @@ export class IsoRenderer {
     return tv === null ? 0 : zVisual(tv.tileHeightAt(e.x, e.y));
   }
 
+  /** Steady-state base draw calls (ground/walls/hazards/decor/sky/sun). */
+  baseDrawCalls(): number {
+    let n = 0;
+    if (this.hasGround) n += 2; // ground + walls
+    if (this.water !== null) n += 1;
+    if (this.lava !== null) n += 1;
+    if (this.landmarks !== null) n += 1;
+    if (this.grassMesh !== null) n += 1;
+    if (this.foliageMesh !== null) n += 1;
+    if (this.trunkMesh !== null) n += 1;
+    if (this.rockMesh !== null) n += 1;
+    if (this.sky !== null) n += 1;
+    if (this.stars !== null && this.stars.visible) n += 1;
+    if (this.sunSprite !== null) n += 1;
+    return n;
+  }
+
+  /** Scene child count (tests pin stability across frames). */
+  childCount(): number {
+    return this.scene.children.length;
+  }
+
+  /** Current decoration plan (tests pin determinism). */
+  decorPlanSnapshot(): DecorItem[] {
+    return this.decorPlan.map((d) => ({ ...d }));
+  }
+
   update(ents: DrawEntity[], camX: number, camY: number, timeMs: number) {
     const dt = this.lastMs ? Math.min(0.1, (timeMs - this.lastMs) / 1000) : 0.016;
     this.lastMs = timeMs;
+    const timeSec = timeMs / 1000;
 
     // Fog-of-war tinting (throttled internally to ~2Hz).
-    this.applyFog(performance.now());
+    let nowPerf = timeMs;
+    try {
+      nowPerf = performance.now();
+    } catch { /* ignore */ }
+    this.applyFog(nowPerf);
 
     // Camera follow (smoothed) — fixed dimetric angle, position tracks player.
     const k = 1 - Math.exp(-dt * 5);
@@ -690,13 +1177,44 @@ export class IsoRenderer {
       this.shakeAmp = 0;
     }
 
-    const alive = new Set<number>();
+    // Sky dome follows the camera target so the horizon never clips.
+    if (this.sky !== null) {
+      this.sky.position.set(this.target.x, this.groundY, this.target.z);
+      if (timeMs - this.lastSkyUpdate > 200) {
+        this.lastSkyUpdate = timeMs;
+        const f = daylightFactor(timeSec);
+        updateSkyDome(this.sky, f, 150);
+      }
+    }
+    if (this.stars !== null) {
+      this.stars.position.set(this.target.x, this.groundY, this.target.z);
+      updateStars(this.stars, daylightFactor(timeSec));
+    }
+    if (this.sunSprite !== null) updateSun(this.sunSprite, this.target, daylightFactor(timeSec));
+
+    // Water shimmer + lava pulse (materials only, no new geometry).
+    if (this.water !== null) {
+      const m = this.water.material as THREE.MeshLambertMaterial;
+      m.opacity = 0.68 + Math.sin(timeSec * 2.1) * 0.1;
+    }
+    if (this.lava !== null) {
+      const m = this.lava.material as THREE.MeshLambertMaterial;
+      m.emissiveIntensity = 0.65 + (Math.sin(timeSec * 5.2) * 0.5 + 0.5) * 0.5;
+    }
+
+    const alive = this.aliveSet;
+    alive.clear();
     for (const e of ents) {
       alive.add(e.id);
       let b = this.bodies.get(e.id);
       if (!b) { b = this.makeBody(e); this.bodies.set(e.id, b); }
       // TERRAIN: stand the avatar on the ground (server `z`, else local field).
-      b.g.position.set(e.x, this.entityZ(e), e.y);
+      const gz = this.entityZ(e);
+      b.refs.group.position.set(e.x, gz, e.y);
+      // Stylized locomotion: bob + lean (+ pickup spin/bob, projectile pulse).
+      const isPickup = e.kind === 'pickup';
+      const isProj = e.kind === 'projectile';
+      animateAvatar(b.refs, e.kind, timeSec, dt, isPickup, isProj);
       // Fog-of-war: avatars beyond 25m from the follow target go dark, and
       // avatars in never-explored ground fade out almost entirely.
       let dim = 1;
@@ -704,69 +1222,157 @@ export class IsoRenderer {
         const tier = this.fog ? this.fogTierAt(e.x, e.y) : (Math.hypot(e.x - this.target.x, e.y - this.target.z) > FOG_RADIUS ? 1 : 0);
         dim = tier === 0 ? 1 : tier === 1 ? 0.45 : 0.15;
       }
-      b.mat.color.set(b.baseColor).multiplyScalar(dim);
-      if (e.kind !== 'pickup' && e.kind !== 'projectile') {
-        const frac = e.maxHp > 0 ? Math.max(0, e.hp / e.maxHp) : 0;
-        b.fg.scale.set(1.2 * frac, 0.12, 1);
-        (b.fg.material as THREE.SpriteMaterial).color.set(frac > 0.5 ? 0x51ff7a : frac > 0.25 ? 0xffb84d : 0xff5252);
-      }
-    }
-    for (const [id, b] of [...this.bodies]) {
-      if (alive.has(id)) continue;
-      this.scene.remove(b.g);
-      b.g.traverse((o) => {
-        const mesh = o as THREE.Mesh;
-        if (mesh.isMesh) {
-          mesh.geometry.dispose();
-          const m = mesh.material as THREE.Material | undefined;
-          m?.dispose();
+      b.refs.bodyMat.color.setHex(b.baseColor).multiplyScalar(dim);
+      b.refs.baseMat.color.setHex(b.teamColor).multiplyScalar(dim);
+      b.refs.headMat.color.setHex(0xf2c89b).multiplyScalar(dim);
+      // Projectile tracers: additive glow + periodic ember trail.
+      if (isProj) {
+        b.refs.body.rotation.y += dt * 6;
+        if (this.bursts !== null && timeMs - b.refs.trailT > 90) {
+          b.refs.trailT = timeMs;
+          this.bursts.ember(e.x, gz, e.y, b.baseColor);
         }
-      });
+      }
+      if (!isPickup && !isProj && b.refs.hpFg !== null && b.refs.hpBg !== null) {
+        const frac = e.maxHp > 0 ? Math.max(0, e.hp / e.maxHp) : 0;
+        b.refs.hpFg.scale.set(1.2 * frac, 0.12, 1);
+        (b.refs.hpFg.material as THREE.SpriteMaterial).color.set(frac > 0.5 ? 0x51ff7a : frac > 0.25 ? 0xffb84d : 0xff5252);
+        const hpDim = 0.35 + 0.65 * dim;
+        (b.refs.hpBg.material as THREE.SpriteMaterial).opacity = hpDim;
+        (b.refs.hpFg.material as THREE.SpriteMaterial).opacity = hpDim;
+      }
+      b.lastBX = e.x;
+      b.lastBZ = e.y;
+    }
+    // Removals double as deaths: pop a pooled burst at the last position.
+    this.removeIds.length = 0;
+    for (const [id, b] of this.bodies) {
+      if (alive.has(id)) continue;
+      this.removeIds.push(id);
+    }
+    for (let i = 0; i < this.removeIds.length; i++) {
+      const id = this.removeIds[i]!;
+      const b = this.bodies.get(id);
+      if (!b) continue;
+      if (b.kind === 'mob' || b.kind === 'player' || b.kind === 'npc') {
+        this.deathBurst(b.lastBX, b.lastBZ, b.baseColor);
+      } else if (b.kind === 'projectile' || b.kind === 'pickup') {
+        this.deathBurst(b.lastBX, b.lastBZ, 0xfff2b0);
+      }
+      this.disposeBody(b);
       this.bodies.delete(id);
     }
 
-    // Flashes decay.
-    this.flashes = this.flashes.filter((f) => {
+    // Pooled particles + beam (no per-frame allocation).
+    this.bursts?.update(dt);
+    if (this.bursts !== null) {
+      const anyAlive = this.bursts.alive() > 0;
+      this.bursts.points.visible = anyAlive;
+    }
+    if (this.beam !== null) updateLevelBeam(this.beam, dt);
+
+    // Lava flicker light follows the local player when lava is near.
+    if (this.lavaLight !== null) {
+      let lx = this.target.x;
+      let lz = this.target.z;
+      let ly = this.groundY;
+      for (const b of this.bodies.values()) {
+        if (b.isLocal) {
+          lx = b.refs.group.position.x;
+          lz = b.refs.group.position.z;
+          ly = b.refs.group.position.y;
+          break;
+        }
+      }
+      if (timeMs - this.lavaNearCheckedAt > 400) {
+        this.lavaNearCheckedAt = timeMs;
+        this.lavaNear = false;
+        if (this.terrain !== null && this.lavaPos.length > 0) {
+          const R = 7;
+          const cx = Math.floor(lx);
+          const cy = Math.floor(lz);
+          outer: for (let ty = cy - R; ty <= cy + R; ty++) {
+            for (let tx = cx - R; tx <= cx + R; tx++) {
+              if (tx < 0 || ty < 0 || tx >= ARENA || ty >= ARENA) continue;
+              try {
+                if (this.terrain.kindAtTile(tx, ty) === TERR_LAVA) {
+                  this.lavaNear = true;
+                  break outer;
+                }
+              } catch { /* ignore */ }
+            }
+          }
+        }
+      }
+      if (this.lavaNear) {
+        this.lavaLight.visible = true;
+        this.lavaLight.position.set(lx, ly + 2.2, lz);
+        this.lavaLight.intensity = 1.4 + Math.sin(timeSec * 11) * 0.45 + Math.sin(timeSec * 23.7) * 0.25;
+      } else {
+        this.lavaLight.visible = false;
+        this.lavaLight.intensity = 0;
+      }
+    }
+
+    // Flashes decay (backwards splice — no new array per frame).
+    for (let i = this.flashes.length - 1; i >= 0; i--) {
+      const f = this.flashes[i]!;
       f.life -= dt;
       const t = Math.max(0, f.life / f.max);
       f.m.scale.setScalar(1 + (1 - t) * 2.2);
       (f.m.material as THREE.MeshBasicMaterial).opacity = t * 0.9;
-      if (f.life <= 0) { this.scene.remove(f.m); f.m.geometry.dispose(); f.m.material.dispose(); return false; }
-      return true;
-    });
+      if (f.life <= 0) {
+        this.scene.remove(f.m);
+        f.m.geometry.dispose();
+        f.m.material.dispose();
+        this.flashes.splice(i, 1);
+      }
+    }
 
     // Telegraph rings expand over their windup, then flash once.
-    const nowMs = performance.now();
-    this.tele = this.tele.filter((t) => {
-      const frac = (nowMs - t.t0) / Math.max(1, t.ttl);
+    for (let i = this.tele.length - 1; i >= 0; i--) {
+      const t = this.tele[i]!;
+      const frac = (nowPerf - t.t0) / Math.max(1, t.ttl);
       if (frac >= 1) {
         this.scene.remove(t.g);
         t.g.traverse((o) => {
           const mesh = o as THREE.Mesh;
-          if (mesh.isMesh) {
+          if ((mesh as unknown as { isMesh?: boolean }).isMesh) {
             mesh.geometry.dispose();
             (mesh.material as THREE.Material)?.dispose();
           }
         });
+        this.tele.splice(i, 1);
         this.flash(t.x, t.y, 0xff3030);
-        return false;
+        continue;
       }
       const f = Math.max(0, Math.min(1, frac));
       t.g.scale.setScalar(Math.max(0.05, t.r * (0.15 + 0.85 * f)));
       const ring = t.g.children[0] as THREE.Mesh<THREE.CircleGeometry, THREE.MeshBasicMaterial> | undefined;
       const disc = t.g.children[1] as THREE.Mesh<THREE.CircleGeometry, THREE.MeshBasicMaterial> | undefined;
+      const glow = t.g.children[2] as THREE.Mesh<THREE.RingGeometry, THREE.MeshBasicMaterial> | undefined;
       if (ring) (ring.material as THREE.MeshBasicMaterial).opacity = 0.55 + 0.45 * f;
       if (disc) (disc.material as THREE.MeshBasicMaterial).opacity = 0.06 + 0.16 * f;
-      return true;
-    });
+      if (glow) (glow.material as THREE.MeshBasicMaterial).opacity = 0.12 + 0.22 * f;
+    }
 
-    // Day/night lerp: sun + ambient + background.
-    const f = daylightFactor(timeMs / 1000);
+    // Day/night lerp: sun + ambient + background, warm at dawn/dusk.
+    const f = daylightFactor(timeSec);
     this.sun.intensity = 0.25 + 1.15 * f;
+    this.sun.color.copy(this.sunWarm).lerp(this.sunNoon, Math.min(1, f * 1.2));
     this.amb.intensity = 0.35 + 0.45 * f;
     this.hemi.intensity = 0.15 + 0.35 * f;
     this.bg.copy(this.night).lerp(this.day, f);
 
-    this.renderer.render(this.scene, this.camera);
+    try {
+      this.renderer.render(this.scene, this.camera);
+    } catch { /* headless stub render is a no-op */ }
   }
 }
+
+// Re-export art-test surface so render tests pin determinism without
+// importing scene_art directly (keeps the old import graph working).
+export { decorMatrices, planDecorations };
+export type { DecorItem };
+export { avatarVariant, tileShade, hash2i };
+export { blobShadowTexture, glowTexture, tileEdgeTexture };
