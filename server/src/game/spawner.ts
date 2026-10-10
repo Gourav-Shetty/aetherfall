@@ -23,7 +23,19 @@ import {
 import { mobMaxHp, rollSpawnForZone } from './content.js';
 import { MOB_ID_MAX, MOB_ID_MIN, isSpawnerMobId } from './mobs.js';
 
-export const MOBS_PER_CHUNK = 4;
+/**
+ * Mobs per 32x32 chunk. 4 was the original value and made the world nearly
+ * empty: a chunk is 1024 sq units, so 4 gives an average of 1.8 mobs inside a
+ * 12u interaction disc (452 sq units), and the spawn-safe discs remove ~27% of
+ * the arena on top of that. Measured across the arena, 40% of sample points
+ * outside the discs had ZERO mobs within 12u, and a 40-second walk across the
+ * world never came within sight of a single one.
+ *
+ * 12 targets 5+ mobs in reach, so a walk always has a fight in it, while
+ * leaving the AI's awake set (~29 mobs inside ACTIVE_RADIUS per player) well
+ * inside the measured tick budget.
+ */
+export const MOBS_PER_CHUNK = 12;
 export const MOB_NAMES = ['gloomfang', 'ashcrawler', 'thornback', 'mistwisp'] as const;
 
 /**

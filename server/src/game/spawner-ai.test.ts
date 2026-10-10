@@ -194,16 +194,27 @@ describe('spawner AI: sneak still works', () => {
   it('does NOT acquire a perfectly still player beyond 4u', () => {
     const { spawner, ai } = world();
     let checked = false;
-    for (const m of spawner.mobsList()) {
-      if (!arm(ai, spawner, m.id)) continue;
-      // Same placement, only the reported speed differs: the sneak leg is the
-      // single thing under test.
-      const seenIfMoving = inCone(ai, spawner, m.id, 8, 1);
+    // Snapshot the ids first: the isolation below removes mobs, and mutating the
+    // list while walking it would drop candidates before they are even tried.
+    const ids = spawner.mobsList().map((m) => m.id);
+    for (const id of ids) {
+      const m = spawner.getMob(id);
+      if (!m || !arm(ai, spawner, id)) continue;
+      const seenIfMoving = inCone(ai, spawner, id, 8, 1);
       if (!seenIfMoving) continue;
-      const still = inCone(ai, spawner, m.id, 8, 0);
+      // HERMETIC: the sneak rule is about THIS mob's cone. `world()` now populates
+      // 12 mobs per chunk, so a bystander can sit inside the 4u "still targets
+      // are visible anyway" band and hit the statue — which would fail this test
+      // for a reason that has nothing to do with the leg under test. Strip every
+      // other body so the assertion can only ever describe `m`. Done only after
+      // `id` has a usable placement, so the loop still has its subject.
+      for (const other of spawner.mobsList()) {
+        if (other.id !== id) spawner.removeMob(other.id);
+      }
+      const still = inCone(ai, spawner, id, 8, 0);
       assert.equal(still, null, 'a statue beyond 4u must be invisible');
       assert.equal(
-        ai.canSee(m.id, seenIfMoving.x, seenIfMoving.y, 0),
+        ai.canSee(id, seenIfMoving.x, seenIfMoving.y, 0),
         false,
         'canSee(speed 0) must refuse the same point canSee(speed 1) accepts',
       );
@@ -218,7 +229,7 @@ describe('spawner AI: sneak still works', () => {
           !ev.some((e) => e.kind === 'damage-player'),
           'a mob hit a player it never detected',
         );
-        assert.equal(ai.debugMob(m.id)!.targetId, null, 'acquired a still player');
+        assert.equal(ai.debugMob(id)!.targetId, null, 'acquired a still player');
       }
       assert.ok(Math.hypot(seenIfMoving.x - m.pos.x, seenIfMoving.y - m.pos.y) > 4);
       checked = true;

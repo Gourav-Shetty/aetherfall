@@ -391,10 +391,15 @@ export function chainOnCollect(state: QuestState, count = 1): QuestEvent[] {
 
 /**
  * Advance unlocked chain 'explore' quests for distinct new chunks.
- * Mirrors quests.onExplore semantics: caller-owned `seen` set, spawn chunk free.
+ *
+ * Mirrors quests.onExplore semantics, including the shared-ledger rule: `seen`
+ * is the single per-player set of distinct chunks also handed to `onExplore`
+ * and `roadOnExplore`, so the key is folded in idempotently and this family's
+ * own progress guard decides what to award. Treating it as a private
+ * early-return cursor starved `chart-the-fall` — which gates `heart-of-fall`,
+ * leaving the chain (and the Ward Blade) permanently unreachable.
  */
 export function chainOnExplore(state: QuestState, seen: Set<string>, chunkKey: string): QuestEvent[] {
-  if (seen.has(chunkKey)) return [];
   seen.add(chunkKey);
   ensureChainProgress(state);
   const out: QuestEvent[] = [];

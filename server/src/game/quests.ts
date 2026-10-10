@@ -92,14 +92,27 @@ export function onCollect(state: QuestState, count = 1): QuestEvent[] {
 
 /**
  * Record visiting a chunk key (`cx,cy`) for 'explore' quests.
- * Distinct chunks only: callers pass the player's current chunk key each tick;
- * repeats are ignored via the `seen` set the caller owns per player.
+ *
+ * `seen` is the CALLER's set of distinct chunks walked this session, and it is
+ * shared by every explore family (trio `onExplore`, Road `roadOnExplore`,
+ * Maren `chainOnExplore`) because the server has one `seenChunks` set per
+ * player. It is therefore a LEDGER, not a per-family cursor: a key is folded in
+ * idempotently and each family's own monotonic progress guard below decides
+ * whether there is anything to award.
+ *
+ * It must NOT be used as an early-return (`if (seen.has(key)) return []`).
+ * That made the ledger a single-consumer token: whichever family the tick ran
+ * first consumed the key and the other two bailed forever, so `explorer`
+ * advanced while `road-lookout` and `chart-the-fall` never moved — and
+ * `chart-the-fall` gates `heart-of-fall`, soft-locking the whole Maren chain.
+ *
+ * Distinct chunks only: repeats are naturally idempotent because `target` is
+ * derived from `seen.size` and only applied when it exceeds `p.count`.
+ * The first chunk ever seen is the spawn chunk — discovering NEW chunks counts,
+ * so progress = seen.size - 1 (chunks beyond spawn).
  */
 export function onExplore(state: QuestState, seen: Set<string>, chunkKey: string): QuestEvent[] {
-  if (seen.has(chunkKey)) return [];
   seen.add(chunkKey);
-  // First chunk ever seen is the spawn chunk — discovering NEW chunks counts.
-  // Progress = seen.size - 1 (chunks beyond spawn).
   const out: QuestEvent[] = [];
   for (const q of QUEST_DEFS) {
     if (q.kind !== 'explore') continue;
@@ -274,11 +287,15 @@ export function roadOnCollect(state: QuestState, count = 1): QuestEvent[] {
 
 /**
  * Advance the unlocked Road 'explore' step. Mirrors `onExplore`: the caller
- * owns the `seen` set, the spawn chunk is free, and progress is the count of
- * distinct chunks beyond it (never a re-walk of ground already covered).
+ * owns the `seen` set of distinct chunks, the spawn chunk is free, and progress
+ * is the count of distinct chunks beyond it (never a re-walk of ground already
+ * covered).
+ *
+ * `seen` is SHARED with `onExplore` and `chainOnExplore` (one `seenChunks` set
+ * per player), so — exactly like `onExplore` — it is a ledger to fold the key
+ * into, never an early-return cursor. See the long note on `onExplore`.
  */
 export function roadOnExplore(state: QuestState, seen: Set<string>, chunkKey: string): QuestEvent[] {
-  if (seen.has(chunkKey)) return [];
   seen.add(chunkKey);
   ensureRoadProgress(state);
   const out: QuestEvent[] = [];

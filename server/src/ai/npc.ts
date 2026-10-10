@@ -4,10 +4,11 @@
 // SpatialHash (target acquisition) + astar (pathing).
 // index.ts calls tick() at 10Hz and merges snapshot()/events.
 
-import { SpatialHash, astar } from '@aetherfall/engine';
+import { SpatialHash, astar, rectLos } from '@aetherfall/engine';
 import type { EntitySnapshot } from '@aetherfall/shared';
 import { mulberry32 } from '@aetherfall/shared';
 import { NPC_ID_MAX, NPC_ID_MIN } from '../game/mobs.js';
+import { isSpawnSafeZone } from '../game/spawner.js';
 import type { BossName } from '../game/content.js';
 import {
   DOWNED_DURATION_MS,
@@ -345,6 +346,13 @@ function wireTelegraph(
  * radius the impact `damage` event uses). Samples are spaced 2r apart so the
  * chain has no gaps, capped at MAX_LINE_SAMPLES to stay inside the client's
  * 12-telegraph ring buffer.
+ *
+ * GAP FIX: the sample COUNT is capped but the sample RADIUS was not, so a long
+ * corridor (14u charge range) drew 4 circles 3.5u apart with r=1.5 — leaving a
+ * 0.5u strip of the corridor with NO telegraph at all, right through the part
+ * of the dash that deals full damage. `MAX_LINE_SAMPLES` exists to protect the
+ * client's ring buffer, so the radius absorbs the surplus instead: every
+ * sample is grown until consecutive samples overlap.
  */
 function lineTelegraphs(e: Extract<BossEvent, { kind: 'charge' }>): NpcTelegraphEvent[] {
   const out: NpcTelegraphEvent[] = [];
@@ -352,10 +360,12 @@ function lineTelegraphs(e: Extract<BossEvent, { kind: 'charge' }>): NpcTelegraph
   const len = Math.hypot(e.x2 - e.x1, e.y2 - e.y1);
   if (len > 1e-6) {
     const n = Math.min(MAX_LINE_SAMPLES, Math.max(1, Math.ceil(len / (2 * r))));
+    // Sample centres sit len/n apart; widen each circle so neighbours touch.
+    const rr = Math.min(TELEGRAPH_R_MAX, Math.max(r, len / (2 * n) + 0.05));
     // Skip t=1: the landing circle below covers the end of the corridor.
     for (let i = 0; i < n; i++) {
       const t = (i + 0.5) / n;
-      out.push(wireTelegraph(e.x1 + (e.x2 - e.x1) * t, e.y1 + (e.y2 - e.y1) * t, r, e.ttlMs, e.label));
+      out.push(wireTelegraph(e.x1 + (e.x2 - e.x1) * t, e.y1 + (e.y2 - e.y1) * t, rr, e.ttlMs, e.label));
     }
   }
   out.push(wireTelegraph(e.x2, e.y2, e.width + 1.0, e.ttlMs, e.label));
@@ -396,6 +406,12 @@ export class NPCManager {
   private lastPos = new Map<number, { x: number; y: number }>();
   /** Emote seq counter for TAUNT bubbles (client EmoteStore identity). */
   private emoteSeq = 1;
+  /**
+   * Player ids already damaged by the corridor half of the attack currently
+   * being resolved, so the companion impact circle cannot hit them a second
+   * time. Lives only for one event batch (cleared by `damage` / `charge`).
+   */
+  private corridorHits: Set<number> | null = null;
 
   constructor() {
     this.grid = [];
@@ -451,16 +467,21 @@ export class NPCManager {
     };
   }
 
-  /** Reset a boss to its anchor and go dormant (post-death or on construction). */
+  /**
+   * Reset a boss to its anchor and go dormant (post-death, or on first wake).
+   *
+   * Delegates the controller's own state to `ctl.reset()`. Doing it field by
+   * field here is what let the Warden come back for its SECOND life with
+   * `shieldsUsed === 2` already spent: neither shield ever came up again, so
+   * every fight after the first was silently a different, easier boss.
+   */
   private resetBoss(b: BossEntry): void {
-    b.ctl.x = b.home.x;
-    b.ctl.y = b.home.y;
-    b.ctl.hp = b.ctl.maxHp;
-    b.ctl.phase = 'chase';
+    b.ctl.reset();
     b.deadT = 0;
     b.lastHitBy = 0;
     b.downedUntil = 0;
     b.stunUntil = 0;
+    this.corridorHits = null;
   }
 
   // ------------------------------------------------------------- spawning
@@ -985,7 +1006,14 @@ export class NPCManager {
       // Downed bosses are already inert: their controller is dead (0 HP), so
       // update() early-returns on its own.
       if (b.stunUntil > nowMs) continue;
-      for (const e of b.ctl.update(dt, targets)) this.pushBossEvent(e, b, targets, ev);
+      // Fresh attack window per boss per tick: the corridor/impact de-dup set
+      // must never leak from one boss (or one tick) into the next.
+      this.corridorHits = null;
+      // Line of sight: a boss will not start (or keep) a fight through a wall.
+      // `targets` is already spawn-protection filtered, so this only ever
+      // removes players the boss could not see anyway.
+      const sight = this.bossTargets(b, targets);
+      for (const e of b.ctl.update(dt, sight)) this.pushBossEvent(e, b, targets, ev);
       // clamp to arena
       b.ctl.x = Math.max(1, Math.min(99, b.ctl.x));
       b.ctl.y = Math.max(1, Math.min(99, b.ctl.y));
@@ -994,6 +1022,29 @@ export class NPCManager {
     this.updatePools(dt, targets, ev);
 
     return ev;
+  }
+
+  /**
+   * The players boss `b` is allowed to perceive: its own aggro radius first
+   * (so an awake-but-unapproached arena fixture never wanders), then the
+   * wall LoS leg. Falls back to the raw list when no walls are installed, so
+   * the open-arena default behaves exactly as before.
+   *
+   * PLAYABILITY: nobody standing inside a spawn-safe disc is perceivable by a
+   * boss, the same rule the minion lane already enforces. Without it the two
+   * always-awake fixtures (Stone Golem at (80,80), Void Wisp at (20,80)) reach
+   * way further than the safe discs are wide — a fresh login on east-ridge
+   * (88,48) is 10u from the golem, so the "no mob pile on arrival" promise only
+   * held for the mobs, not the boss standing on top of it.
+   */
+  private bossTargets(b: BossEntry, targets: PlayerView[]): PlayerView[] {
+    let out = targets;
+    if (this.walls.length > 0) {
+      const bx = b.ctl.x;
+      const by = b.ctl.y;
+      out = out.filter((p) => rectLos(this.walls, bx, by, p.x, p.y));
+    }
+    return out.filter((p) => !isSpawnSafeZone(p.x, p.y));
   }
 
   /**
@@ -1021,7 +1072,10 @@ export class NPCManager {
       if (b.downedUntil !== 0) {
         // Unanswered knockdown stood back up; never bled out.
         b.ctl.hp = Math.max(1, Math.ceil(b.ctl.maxHp * DOWNED_RECOVER_FRAC));
-        b.ctl.phase = 'chase';
+        // Drop any half-finished windup: a slam telegraphed on the way down
+        // was already broadcast, and letting it fire on the way back up
+        // meant the marker and the hit disagreed.
+        b.ctl.resetPhase();
         b.downedUntil = 0;
         ev.push({ kind: 'mob-up', id: b.id });
         continue;
@@ -1086,6 +1140,9 @@ export class NPCManager {
       case 'charge':
         // line corridor -> circle chain (client wire accepts shape:'circle' only)
         for (const t of lineTelegraphs(e)) ev.push(t);
+        // A new attack window: forget which players the previous corridor hit
+        // so a stale hit-set can never shield a fresh target from damage.
+        this.corridorHits = null;
         break;
       case 'pool':
         this.pools.push({
@@ -1095,27 +1152,42 @@ export class NPCManager {
         ev.push(wireTelegraph(e.x, e.y, e.r, e.ttlMs, e.label));
         break;
       case 'summon':
-        this.spawnHusk(e.x, e.y);
-        ev.push(wireTelegraph(e.x, e.y, 1.2, 400, e.label));
+        // Only telegraph the arrival when a husk is actually admitted — at the
+        // MAX_HUSKS cap `spawnHusk` returns -1 and the old code still painted a
+        // spawn circle for a minion that never existed.
+        if (this.spawnHusk(e.x, e.y) >= 0) ev.push(wireTelegraph(e.x, e.y, 1.2, 400, e.label));
         break;
       case 'shield':
         // immunity is server-side (takeDamage); the aura is the tell
         ev.push(wireTelegraph(b.ctl.x, b.ctl.y, 3.5, e.on ? 4000 : 400, e.label));
         break;
-      case 'damage':
+      case 'damage': {
+        // One telegraphed attack may only hit a player ONCE. The Wyrm's dash
+        // resolves as `damageLine` (whole corridor) followed by `damage` (the
+        // landing circle, whose radius is width+1 so it strictly contains the
+        // capsule's end). Without this guard anyone standing on the landing
+        // point ate the full charge twice — 60 base, 82 enraged, from a single
+        // telegraph, which one-shots a 100 HP player.
+        const already = this.corridorHits;
         for (const p of targets) {
+          if (already !== null && already.has(p.id)) continue;
           if (Math.hypot(p.x - e.x, p.y - e.y) <= e.r) {
             ev.push({ kind: 'damage-player', targetId: p.id, amount: e.amount, fromId: b.id });
           }
         }
+        this.corridorHits = null;
         break;
+      }
       case 'damageLine': {
         const half = e.width / 2;
+        const hits = new Set<number>();
         for (const p of targets) {
           if (distToSegmentSq(p.x, p.y, e.x1, e.y1, e.x2, e.y2) <= half * half) {
+            hits.add(p.id);
             ev.push({ kind: 'damage-player', targetId: p.id, amount: e.amount, fromId: b.id });
           }
         }
+        this.corridorHits = hits;
         break;
       }
       case 'move':

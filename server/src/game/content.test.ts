@@ -39,6 +39,7 @@ import {
 import { ELDER_MAREN_NODES, dialogueNodeForQuest } from '../ai/dialogue.js';
 import { createQuestState } from './quests.js';
 import { spawnMobsForChunk } from './spawner.js';
+import { MOBS_PER_CHUNK } from './spawner.js';
 
 describe('content zones (engine worldgen)', () => {
   it('has exactly 3 zones', () => {
@@ -239,7 +240,9 @@ describe('content spawner wiring', () => {
     const a = spawnMobsForChunk(0, 0, { seed: 1337 });
     const b = spawnMobsForChunk(0, 0, { seed: 1337 });
     assert.deepEqual(a, b);
-    assert.equal(a.length, 4);
+    // The count is the world's mob density, not a fixed 4 — assert it against
+    // the exported constant so retuning density never breaks this test again.
+    assert.equal(a.length, MOBS_PER_CHUNK);
   });
 
   it('spawned mob HP equals mobMaxHp(zone, level)', () => {

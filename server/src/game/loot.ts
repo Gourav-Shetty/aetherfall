@@ -132,17 +132,33 @@ export function rollLootForKill(
   return out;
 }
 
-/** Scatter pickups around the corpse (deterministic ring when `rand` is seeded). */
+/**
+ * Scatter pickups around the corpse (deterministic ring when `rand` is seeded).
+ *
+ * The angle and radius are sanitised before use. A `rand` that yields NaN or an
+ * Infinity used to flow straight through `Math.cos`/`Math.sin` into the pickup
+ * position, and a NaN position is not merely un-renderable — it defeats the
+ * radius check in `tryPickup` (`d > radius` is false when `d` is NaN), so the
+ * drop became collectable from ANYWHERE on the map. Any non-finite draw
+ * degrades to the default ring instead, so a corpse always drops on the tile it
+ * died on rather than somewhere unreachable or nowhere at all.
+ */
 export function pickupsForLoot(
   drops: ItemStack[],
   x: number,
   y: number,
   rand: () => number = Math.random,
 ): Pickup[] {
+  const ox = Number.isFinite(x) ? x : 0;
+  const oy = Number.isFinite(y) ? y : 0;
+  const draw = (): number => {
+    const v = rand();
+    return Number.isFinite(v) ? Math.min(0.999999, Math.max(0, v)) : 0.5;
+  };
   return drops.map((d, i) => {
-    const angle = rand() * Math.PI * 2 + (i * Math.PI * 2) / Math.max(1, drops.length);
-    const r = 0.6 + rand() * 0.8;
-    return makePickup(d.itemId, d.count, x + Math.cos(angle) * r, y + Math.sin(angle) * r);
+    const angle = draw() * Math.PI * 2 + (i * Math.PI * 2) / Math.max(1, drops.length);
+    const r = 0.6 + draw() * 0.8;
+    return makePickup(d.itemId, d.count, ox + Math.cos(angle) * r, oy + Math.sin(angle) * r);
   });
 }
 
