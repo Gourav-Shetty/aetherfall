@@ -85,6 +85,13 @@ interface Body {
 }
 interface Flash { m: THREE.Mesh<THREE.RingGeometry, THREE.MeshBasicMaterial>; life: number; max: number; }
 interface TeleRing { g: THREE.Group; x: number; y: number; r: number; t0: number; ttl: number; }
+/** Floor blood decal: a kill position (+ its splat mesh) fading over BLOOD_TTL_MS. */
+interface BloodSplat { x: number; y: number; t0: number; mesh: THREE.Mesh; }
+
+/** Blood decals kept per renderer (last kills as fading floor splats). */
+export const BLOOD_MAX = 200;
+/** ms a blood splat stays visible before it is pruned (fades throughout). */
+export const BLOOD_TTL_MS = 30000;
 
 const FOG_RADIUS = 25;
 
@@ -162,6 +169,12 @@ export class IsoRenderer {
   private lastFogApply = 0;
   /** Decaying screen-shake amplitude (0 = idle), see shake(). */
   private shakeAmp = 0;
+  /** Hit-stop freeze end (ms, same clock as update's timeMs). See hitStop(). */
+  private hitStopUntil = 0;
+  /** Floor blood decals: last BLOOD_MAX kill positions, fading over BLOOD_TTL_MS. */
+  private blood: BloodSplat[] = [];
+  /** Downed (crawling) entity ids: set by `mob-downed`, cleared by `mob-up`/`mob-die`. */
+  private downedIds = new Set<number>();
   /**
    * a11y entity colours. Defaults mirror BODY_COLORS (the shipped palette);
    * setEntityColors() replaces them with a colourblind-safe preset and
@@ -331,6 +344,12 @@ export class IsoRenderer {
         (f.m.material as THREE.Material).dispose();
       }
       this.flashes.length = 0;
+      for (const s of this.blood) {
+        this.scene.remove(s.mesh);
+        s.mesh.geometry.dispose();
+        (s.mesh.material as THREE.Material).dispose();
+      }
+      this.blood.length = 0;
       for (const t of this.tele) {
         this.scene.remove(t.g);
         t.g.traverse((o) => {
@@ -1084,6 +1103,75 @@ export class IsoRenderer {
     this.shakeAmp = Math.min(1.6, this.shakeAmp + Math.max(0, strength));
   }
 
+  /**
+   * Hit-stop freeze (server `hit-stop` on kills, 90ms). While frozen, update()
+   * returns immediately so the last frame persists — camera, particles, flashes
+   * and telegraphs all pause. Callers gate on the reduced-motion setting (no
+   * freeze when reduced motion is on); pass an explicit `nowMs` in tests.
+   */
+  hitStop(durationMs = 90, nowMs?: number) {
+    if (!(durationMs > 0)) return;
+    const t = nowMs ?? performance.now();
+    if (!Number.isFinite(t)) return;
+    this.hitStopUntil = Math.max(this.hitStopUntil, t + durationMs);
+  }
+
+  /** True while a hit-stop freeze covers `nowMs` (defaults to now). */
+  isHitStopped(nowMs?: number): boolean {
+    const t = nowMs ?? performance.now();
+    return Number.isFinite(t) && t < this.hitStopUntil;
+  }
+
+  /**
+   * Record a kill position as a floor blood splat (flat dark-red disc that
+   * fades over BLOOD_TTL_MS). Keeps the last BLOOD_MAX; non-finite input is
+   * ignored. Meshes are shared-geometry circles with per-splat materials so
+   * fading never touches another splat.
+   */
+  addBlood(x: number, y: number, nowMs?: number) {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    const t = nowMs ?? performance.now();
+    if (!Number.isFinite(t)) return;
+    const gz = (this.terrain?.tileHeightAt(x, y) ?? 0) * TERRAIN_Z_SCALE;
+    const mesh = new THREE.Mesh(
+      new THREE.CircleGeometry(0.45, 20),
+      new THREE.MeshBasicMaterial({ color: 0x8a1420, transparent: true, opacity: 0.55, depthWrite: false }),
+    );
+    mesh.rotation.x = -Math.PI / 2;
+    mesh.position.set(x, gz + 0.03, y);
+    mesh.renderOrder = 1;
+    this.scene.add(mesh);
+    this.blood.push({ x, y, t0: t, mesh });
+    while (this.blood.length > BLOOD_MAX) {
+      const old = this.blood.shift();
+      if (old) {
+        this.scene.remove(old.mesh);
+        old.mesh.geometry.dispose();
+        (old.mesh.material as THREE.Material).dispose();
+      }
+    }
+  }
+
+  /** Live blood splat count (tests + cap pinning). */
+  bloodCount(): number {
+    return this.blood.length;
+  }
+
+  /** Mark an entity downed (crawl state) via the server `mob-downed` event. */
+  markDowned(id: number) {
+    if (Number.isInteger(id)) this.downedIds.add(id);
+  }
+
+  /** Clear a downed mark (`mob-up` recovery or `mob-die` finish). */
+  clearDowned(id: number) {
+    this.downedIds.delete(id);
+  }
+
+  /** True while the entity renders in the crawl state. */
+  isDowned(id: number): boolean {
+    return this.downedIds.has(id);
+  }
+
   project(x: number, y: number, z?: number): { sx: number; sy: number } {
     const v = this.scratchOut;
     v.set(x, (z ?? 0) * TERRAIN_Z_SCALE + 1.6, y).project(this.camera);
@@ -1145,6 +1233,8 @@ export class IsoRenderer {
   }
 
   update(ents: DrawEntity[], camX: number, camY: number, timeMs: number) {
+    // Hit-stop: freeze the sim — the last frame persists, nothing advances.
+    if (this.isHitStopped(timeMs)) return;
     const dt = this.lastMs ? Math.min(0.1, (timeMs - this.lastMs) / 1000) : 0.016;
     this.lastMs = timeMs;
     const timeSec = timeMs / 1000;
@@ -1211,6 +1301,14 @@ export class IsoRenderer {
       // TERRAIN: stand the avatar on the ground (server `z`, else local field).
       const gz = this.entityZ(e);
       b.refs.group.position.set(e.x, gz, e.y);
+      // DOWNED crawl (server `mob-downed`): flattened avatar while the crawl
+      // timer runs. animateAvatar() never writes group.scale (only children),
+      // so this composes with the walk bob instead of fighting it.
+      if ((e.kind === 'mob' || e.kind === 'npc') && this.downedIds.has(e.id)) {
+        b.refs.group.scale.set(1.25, 0.45, 1.25);
+      } else if (e.kind === 'mob' || e.kind === 'npc') {
+        b.refs.group.scale.set(1, 1, 1);
+      }
       // Stylized locomotion: bob + lean (+ pickup spin/bob, projectile pulse).
       const isPickup = e.kind === 'pickup';
       const isProj = e.kind === 'projectile';
@@ -1312,6 +1410,20 @@ export class IsoRenderer {
         this.lavaLight.visible = false;
         this.lavaLight.intensity = 0;
       }
+    }
+
+    // Blood decals fade over BLOOD_TTL_MS, then are pruned (geometry disposed).
+    for (let i = this.blood.length - 1; i >= 0; i--) {
+      const s = this.blood[i]!;
+      const age = timeMs - s.t0;
+      if (age >= BLOOD_TTL_MS) {
+        this.scene.remove(s.mesh);
+        s.mesh.geometry.dispose();
+        (s.mesh.material as THREE.Material).dispose();
+        this.blood.splice(i, 1);
+        continue;
+      }
+      (s.mesh.material as THREE.MeshBasicMaterial).opacity = 0.55 * (1 - Math.max(0, age) / BLOOD_TTL_MS);
     }
 
     // Flashes decay (backwards splice — no new array per frame).

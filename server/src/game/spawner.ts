@@ -6,6 +6,11 @@
 import { genChunk, getZone } from '@aetherfall/engine';
 import { mulberry32 } from '@aetherfall/shared';
 import { RESPAWN_DELAY_MS, makeMob, type Mob } from './combat.js';
+import {
+  DOWNED_DURATION_MS,
+  DOWNED_RECOVER_FRAC,
+  THROW_STUN_MS,
+} from '../systems/combat_ext.js';
 import { mobMaxHp, rollSpawnForZone } from './content.js';
 import { MOB_ID_MAX, MOB_ID_MIN, isSpawnerMobId } from './mobs.js';
 
@@ -76,6 +81,8 @@ export type MobHit = {
   /** Damage the swing resolved to, before the hp floor clamped it. */
   resolved: number;
   killed: boolean;
+  /** True when this hit was a finisher on a downed mob. */
+  finished?: boolean;
 };
 
 /** Stable per-chunk id base so mob ids don't collide across chunks.
@@ -234,6 +241,8 @@ export class Spawner {
     m.alive = false;
     m.respawnAt = now + respawnDelayMs;
     m.targetId = null;
+    m.downedUntil = 0;
+    m.stunUntil = 0;
     return true;
   }
 
@@ -242,6 +251,11 @@ export class Spawner {
    * death bookkeeping (hp clamp, alive=false, RESPAWN_DELAY_MS timer) so
    * updateRespawns() brings it back unchanged — the 5s timer stays the single
    * respawn authority. Returns null for unknown/dead mobs.
+   *
+   * NOTE: the authoritative melee path (game/index.ts playerMeleeAttack)
+   * intercepts lethal swings BEFORE calling this and routes them into DOWNED
+   * via downMob() instead, so `damageMob` keeps its direct-kill semantics for
+   * existing callers and tests.
    */
   damageMob(id: number, amount: number, now: number): MobHit | null {
     const m = this.mobs.get(id);
@@ -263,5 +277,83 @@ export class Spawner {
     const m = this.mobs.get(id);
     if (m) this.unindex(m);
     return this.mobs.delete(id);
+  }
+
+  // ------------------------------------------------- downed / finisher / stun
+  //
+  // Close-quarters finish loop (see game/melee/downed.ts for the shared
+  // tuning). Downed mobs stay `alive` with 0 HP so targeting, snapshots and
+  // the interest filter keep seeing them; only the melee finish path
+  // (finishMob) can kill them. Ranged-equivalent damage must check isDowned()
+  // first and refuse the finish.
+
+  /** True while the mob's crawl timer still covers `now`. */
+  isDowned(id: number, now: number): boolean {
+    const m = this.mobs.get(id);
+    return !!m && (m.downedUntil ?? 0) > now;
+  }
+
+  /** True while the mob's stun timer still covers `now`. */
+  isStunned(id: number, now: number): boolean {
+    const m = this.mobs.get(id);
+    return !!m && (m.stunUntil ?? 0) > now;
+  }
+
+  /**
+   * Knock a living mob DOWNED instead of killing it: hp floored at 0, crawl
+   * timer armed for DOWNED_DURATION_MS, aggro dropped. Returns the mob, or
+   * null for unknown/dead/already-downed mobs.
+   */
+  downMob(id: number, now: number, durationMs = DOWNED_DURATION_MS): Mob | null {
+    const m = this.mobs.get(id);
+    if (!m || !m.alive) return null;
+    if ((m.downedUntil ?? 0) > now) return null;
+    m.hp = 0;
+    m.downedUntil = now + Math.max(0, durationMs);
+    m.targetId = null;
+    return m;
+  }
+
+  /**
+   * Finish a downed mob: instant kill with the standard 5s respawn timer.
+   * Returns null unless the mob is downed right now (wrong target, expired
+   * timer, or a ranged attempt that must refuse — callers check first).
+   */
+  finishMob(id: number, now: number): MobHit | null {
+    const m = this.mobs.get(id);
+    if (!m || !m.alive) return null;
+    if ((m.downedUntil ?? 0) <= now) return null;
+    m.hp = 0;
+    m.alive = false;
+    m.downedUntil = 0;
+    m.stunUntil = 0;
+    m.respawnAt = now + RESPAWN_DELAY_MS;
+    m.targetId = null;
+    return { mob: m, dmg: 0, resolved: 0, killed: true, finished: true };
+  }
+
+  /**
+   * Stand expired downed mobs back up at DOWNED_RECOVER_FRAC of max HP.
+   * Returns the recovered mobs (callers announce one `mob-up` each). Mobs
+   * never bleed out: an unanswered knockdown always gets back up.
+   */
+  recoverDowned(now: number, frac = DOWNED_RECOVER_FRAC): Mob[] {
+    const out: Mob[] = [];
+    for (const m of this.mobs.values()) {
+      const until = m.downedUntil ?? 0;
+      if (!m.alive || until === 0 || until > now) continue;
+      m.hp = Math.max(1, Math.ceil(m.maxHp * Math.max(0, frac)));
+      m.downedUntil = 0;
+      out.push(m);
+    }
+    return out;
+  }
+
+  /** Stun a living mob for `stunMs` (thrown sidearms). Returns false when unknown/dead. */
+  stunMob(id: number, now: number, stunMs = THROW_STUN_MS): boolean {
+    const m = this.mobs.get(id);
+    if (!m || !m.alive) return false;
+    m.stunUntil = now + Math.max(0, stunMs);
+    return true;
   }
 }

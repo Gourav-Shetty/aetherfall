@@ -62,3 +62,44 @@ Mobs are mirrored as engine entities with `pos` + `mob` components.
 - Route dropped mob loot → `makePickup` + `tryPickup` + `onCollect` quest hook.
 - Wire `attack` input → `tryMeleeAttack` + `onKill` quest hook with damage events.
 - Persist `GuildStore.toJSON()` / quest state via the persistence layer.
+
+## Close-quarters finish loop
+
+Mobs and NPCs reduced to 0 HP go DOWNED and crawl instead of dying. Only a
+melee swing inside finish reach finishes them (instant kill + bonus XP).
+Projectile-equivalent hits knock down but never finish, and an unanswered
+knockdown stands back up — so the killer must walk up and take the risk.
+
+| System    | Constant                         | Value        |
+| --------- | -------------------------------- | ------------ |
+| Finish    | `DOWNED_DURATION_MS` (crawl)     | 3000 ms      |
+| Finish    | `FINISH_RANGE` (melee only)      | 2.2 units    |
+| Finish    | `FINISHER_BONUS_XP` (per finish) | 15 XP        |
+| Finish    | `DOWNED_RECOVER_FRAC` (stand-up) | 0.3 × max HP |
+| Throw     | `THROW_RANGE`                    | 6 units      |
+| Throw     | `THROW_STUN_MS`                  | 1000 ms      |
+| Throw     | unarmed pickup radius            | 1.5 units    |
+| Feel      | `HIT_STOP_MS` (kill freeze)      | 90 ms        |
+| Feel      | blood decals kept per renderer   | last 200     |
+
+## Systems
+
+- **Downed** (`game/melee/downed.ts`, canonical numbers in
+  `systems/combat_ext.ts`): lethal melee swings call `Spawner.downMob()` /
+  `NPCManager` downed entry (hp 0, crawl timer, aggro dropped) and announce
+  `mob-downed`. `playerMeleeAttack` / `NPCManager.damageFromPlayer` finish a
+  downed target in melee reach (`mob-die`/`boss-kill` + `FINISHER_BONUS_XP` +
+  `hit-stop`); `ranged:true` swings refuse with `reason:'downed'` (spawner) or
+  `-1` (NPCs). `tickGameplay` / `NPCManager.tick` recover expired knockdowns
+  (`mob-up`, partial HP) — nothing bleeds out on its own.
+- **Thrown sidearms** (`game/melee/throw.ts`, `playerThrowWeapon`): spends the
+  first weapon in inventory, melee-curve damage + 1s stun (`mob-stun`) inside
+  `THROW_RANGE`, weapon lands as a `makePickup` at `landingPos()` (hit or
+  miss, announced via `weapon-throw` + `pickup-spawn`). Throws never finish.
+  `playerPickupRadius()` / `collectPickup()` wire the armed (2.5u) / unarmed
+  (1.5u) radius through `tryPickup` + `removePickup` + `onCollect` quest hooks.
+- **Feel**: every kill emits `hit-stop` (client freezes its sim 90ms in both
+  renderers, gated by the reduced-motion setting); both renderers keep the last
+  200 kill positions as fading floor splats (`addBlood`, 30s fade) and render
+  `mob-downed` targets crawling; finisher kills shake harder
+  (`shake(1.0)` ≈ 12px canvas).

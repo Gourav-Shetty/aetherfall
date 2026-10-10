@@ -28,6 +28,13 @@ const SNOW = '#c9d6e4';
 interface Particle { x: number; y: number; vx: number; vy: number; life: number; max: number; color: string; size: number; }
 interface DmgNum { x: number; y: number; text: string; life: number; max: number; color: string; }
 interface Telegraph { x: number; y: number; r: number; ttlMs: number; t0: number; label: string; }
+/** Floor blood decal: a kill position that fades over BLOOD_TTL_MS. */
+interface BloodSplat { x: number; y: number; t0: number; }
+
+/** Blood decals kept per renderer (last kills as fading floor splats). */
+export const BLOOD_MAX = 200;
+/** ms a blood splat stays visible before it is pruned (fades throughout). */
+export const BLOOD_TTL_MS = 30000;
 
 export type { FogLike, RenderOpts };
 
@@ -49,6 +56,12 @@ export class CanvasRenderer {
   private shakeX = 0;
   private shakeY = 0;
   private lastMs = 0;
+  /** Hit-stop freeze end (ms, same clock as render's timeMs). See hitStop(). */
+  private hitStopUntil = 0;
+  /** Floor blood decals: last BLOOD_MAX kill positions, fading over BLOOD_TTL_MS. */
+  private blood: BloodSplat[] = [];
+  /** Downed (crawling) entity ids: set by `mob-downed`, cleared by `mob-up`/`mob-die`. */
+  private downedIds = new Set<number>();
   /** Terrain field (optional — flat arena when null). See terrain_view.ts. */
   private terrain: TerrainView | null = null;
   /**
@@ -182,6 +195,57 @@ export class CanvasRenderer {
     this.shakeAmp = Math.min(26, this.shakeAmp + Math.max(0, strength));
   }
 
+  /**
+   * Hit-stop freeze (server `hit-stop` on kills, 90ms). While frozen, render()
+   * returns immediately so the last frame persists — sim, particles, telegraphs
+   * and shake all pause. Callers gate on the reduced-motion setting (no freeze
+   * when reduced motion is on); pass an explicit `nowMs` in tests.
+   */
+  hitStop(durationMs = 90, nowMs?: number) {
+    if (!(durationMs > 0)) return;
+    const t = nowMs ?? performance.now();
+    if (!Number.isFinite(t)) return;
+    this.hitStopUntil = Math.max(this.hitStopUntil, t + durationMs);
+  }
+
+  /** True while a hit-stop freeze covers `nowMs` (defaults to now). */
+  isHitStopped(nowMs?: number): boolean {
+    const t = nowMs ?? performance.now();
+    return Number.isFinite(t) && t < this.hitStopUntil;
+  }
+
+  /**
+   * Record a kill position as a floor blood splat. Keeps the last BLOOD_MAX;
+   * splats fade over BLOOD_TTL_MS in render(). Non-finite input is ignored.
+   */
+  addBlood(x: number, y: number, nowMs?: number) {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    const t = nowMs ?? performance.now();
+    if (!Number.isFinite(t)) return;
+    this.blood.push({ x, y, t0: t });
+    if (this.blood.length > BLOOD_MAX) this.blood.splice(0, this.blood.length - BLOOD_MAX);
+  }
+
+  /** Live blood splat count (tests + cap pinning). */
+  bloodCount(): number {
+    return this.blood.length;
+  }
+
+  /** Mark an entity downed (crawl state) via the server `mob-downed` event. */
+  markDowned(id: number) {
+    if (Number.isInteger(id)) this.downedIds.add(id);
+  }
+
+  /** Clear a downed mark (`mob-up` recovery or `mob-die` finish). */
+  clearDowned(id: number) {
+    this.downedIds.delete(id);
+  }
+
+  /** True while the entity renders in the crawl state. */
+  isDowned(id: number): boolean {
+    return this.downedIds.has(id);
+  }
+
   screenToWorld(sx: number, sy: number, camX: number, camY: number): { x: number; y: number } {
     const r = this.canvas.getBoundingClientRect();
     return {
@@ -192,6 +256,8 @@ export class CanvasRenderer {
 
   render(ents: DrawEntity[], camX: number, camY: number, timeMs: number, editorWalls?: Set<string>, opts?: RenderOpts) {
     const { ctx, canvas } = this;
+    // Hit-stop: freeze the sim — the last frame persists, nothing advances.
+    if (this.isHitStopped(timeMs)) return;
     const TILE_PX = this.tilePx;
     const W = canvas.width, H = canvas.height;
 
@@ -285,6 +351,26 @@ export class CanvasRenderer {
     const fogOn = !!fog && typeof fpx === 'number' && typeof fpy === 'number';
     const sorted = [...ents].sort((a, b) => a.y - b.y);
     ctx.textAlign = 'center';
+    // Blood decals: fading floor splats for the last BLOOD_MAX kills, drawn
+    // under entities (but over tiles) and culled by the same fog rule.
+    if (this.blood.length > 0) {
+      this.blood = this.blood.filter((s) => timeMs - s.t0 < BLOOD_TTL_MS);
+      for (const s of this.blood) {
+        if (fogOn && Math.hypot(s.x - fpx!, s.y - fpy!) > FOG_RADIUS && !fog!.isExploredWorld(s.x, s.y)) continue;
+        const fade = 1 - Math.max(0, timeMs - s.t0) / BLOOD_TTL_MS;
+        ctx.globalAlpha = Math.max(0, 0.55 * fade);
+        ctx.fillStyle = '#8a1420';
+        ctx.beginPath();
+        ctx.ellipse(toSx(s.x), toSy(s.y) + 8, 9, 4, 0.4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = Math.max(0, 0.4 * fade);
+        ctx.fillStyle = '#5c0d16';
+        ctx.beginPath();
+        ctx.ellipse(toSx(s.x) + 3, toSy(s.y) + 9, 4.5, 2, -0.3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
     for (const e of sorted) {
       // Fog-of-war hides entities standing in never-explored ground.
       if (fogOn && !e.isLocal) {
@@ -309,6 +395,15 @@ export class CanvasRenderer {
       } else if (e.kind === 'projectile') {
         ctx.fillStyle = color;
         ctx.beginPath(); ctx.arc(sx, sy, 4, 0, Math.PI * 2); ctx.fill();
+      } else if ((e.kind === 'mob' || e.kind === 'npc') && this.downedIds.has(e.id)) {
+        // Crawl state (server DOWNED): low flattened body, no standing bob.
+        ctx.fillStyle = color;
+        ctx.beginPath(); ctx.roundRect(sx - 12, sy - 6, 24, 12, 5); ctx.fill();
+        if (e.isLocal) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke(); }
+        // eyes, ground level
+        ctx.fillStyle = '#101418';
+        ctx.fillRect(sx - 8, sy - 2, 4, 4);
+        ctx.fillRect(sx + 4, sy - 2, 4, 4);
       } else {
         const bob = Math.sin(timeMs / 300 + e.id) * 1.5;
         ctx.fillStyle = color;

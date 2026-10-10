@@ -132,6 +132,10 @@ export type CombatantState = {
   /** Stagger poise pool; empties -> stagger. Regenerates out of combat. */
   poise: number;
   dead: boolean;
+  /** ms timestamp until which the combatant is downed (crawl); 0/undefined = up. */
+  downedUntil?: number;
+  /** ms timestamp until which the combatant is stunned (no actions); 0/undefined = free. */
+  stunUntil?: number;
 };
 
 export function makeCombatant(
@@ -248,7 +252,12 @@ export type CombatEvent =
   | { type: 'dot-apply'; targetId: number; effectId: string }
   | { type: 'dot-tick'; targetId: number; effectId: string; amount: number; remainingMs: number }
   | { type: 'hot-tick'; targetId: number; effectId: string; amount: number }
-  | { type: 'death'; targetId: number };
+  | { type: 'death'; targetId: number }
+  | { type: 'downed'; targetId: number; until: number }
+  | { type: 'recover'; targetId: number }
+  | { type: 'finish'; targetId: number; byId: number }
+  | { type: 'stun'; targetId: number; until: number }
+  | { type: 'hit-stop'; targetId: number; durationMs: number };
 
 export type HitInput = {
   /** Raw damage before resistance/crit/block. */
@@ -556,4 +565,128 @@ export function tickRoster(
     events.push(...r.events);
   }
   return { roster: nextRoster, effects: kept, events };
+}
+
+// ---------------------------------------------------------------------------
+// Downed / finisher / thrown weapons / hit-stop (close-quarters finish loop)
+// ---------------------------------------------------------------------------
+//
+// A combatant reduced to 0 HP does not die outright: it goes DOWNED and crawls
+// for DOWNED_DURATION_MS. Only a close-range melee swing inside FINISH_RANGE
+// finishes it (instant kill + bonus XP). Projectile-equivalent hits can knock
+// a target down but never finish it, so the killer must walk up and take the
+// risk. A downed combatant left alone recovers part of its HP and stands back
+// up; it never bleeds out on its own, so waiting at range buys nothing.
+//
+// Thrown sidearms cover the middle distance: THROW_RANGE reach, flat damage on
+// the melee curve plus a THROW_STUN_MS stun, and the weapon lands as a world
+// pickup. Unarmed fighters pick things up at UNARMED_PICKUP_RANGE.
+//
+// Every function below is PURE (same contract as the rest of this module).
+
+/** ms a downed combatant crawls before standing back up. */
+export const DOWNED_DURATION_MS = 3000;
+
+/** Melee reach inside which a downed combatant can be finished. */
+export const FINISH_RANGE = 2.2;
+
+/** Flat bonus XP paid on a finisher kill (on top of the normal kill XP). */
+export const FINISHER_BONUS_XP = 15;
+
+/** Fraction of max HP a downed combatant recovers with on standing up. */
+export const DOWNED_RECOVER_FRAC = 0.3;
+
+/** ms the client freezes its sim on a kill (gated by reduced-motion there). */
+export const HIT_STOP_MS = 90;
+
+/** Thrown sidearm reach in world units. */
+export const THROW_RANGE = 6;
+
+/** ms a thrown sidearm stuns its target. */
+export const THROW_STUN_MS = 1000;
+
+/** Pickup radius while armed (matches the inventory default). */
+export const ARMED_PICKUP_RANGE = 2.5;
+
+/** Pickup radius while unarmed (empty hands fumble more). */
+export const UNARMED_PICKUP_RANGE = 1.5;
+
+/** True while `downedUntil` still covers `now`. */
+export function isDowned(c: Pick<CombatantState, 'downedUntil'>, now: number): boolean {
+  return (c.downedUntil ?? 0) > now;
+}
+
+/** True while `stunUntil` still covers `now`. */
+export function isStunned(c: Pick<CombatantState, 'stunUntil'>, now: number): boolean {
+  return (c.stunUntil ?? 0) > now;
+}
+
+/**
+ * Enter DOWNED: hp floored at 0, crawl timer armed. Returns a fresh state;
+ * the input is never mutated. Emits the `downed` event for the caller to relay.
+ */
+export function enterDowned(
+  c: CombatantState,
+  now: number,
+  durationMs: number = DOWNED_DURATION_MS,
+): { state: CombatantState; events: CombatEvent[] } {
+  const until = now + Math.max(0, durationMs);
+  const state: CombatantState = { ...c, hp: 0, downedUntil: until };
+  return { state, events: [{ type: 'downed', targetId: c.id, until }] };
+}
+
+/**
+ * Stand a downed combatant back up once its timer lapses. Returns the input
+ * state untouched when it is not downed or its timer still runs. Recovery
+ * heals to DOWNED_RECOVER_FRAC of max HP (min 1) and clears the timer.
+ */
+export function recoverDowned(
+  c: CombatantState,
+  now: number,
+  frac: number = DOWNED_RECOVER_FRAC,
+): { state: CombatantState; recovered: boolean; events: CombatEvent[] } {
+  const until = c.downedUntil ?? 0;
+  if (until === 0) return { state: c, recovered: false, events: [] }; // never downed
+  if (until > now) return { state: c, recovered: false, events: [] }; // still crawling
+  const hp = Math.max(1, Math.ceil(c.maxHp * Math.max(0, frac)));
+  const state: CombatantState = { ...c, hp, downedUntil: 0 };
+  return { state, recovered: true, events: [{ type: 'recover', targetId: c.id }] };
+}
+
+/**
+ * Can this swing finish the target? Requires: target downed, attacker inside
+ * FINISH_RANGE, and a melee (non-projectile) swing. Ranged hits never finish.
+ */
+export function canFinish(
+  attacker: Vec2,
+  target: CombatantState,
+  now: number,
+  opts: { ranged?: boolean; range?: number } = {},
+): boolean {
+  if (opts.ranged === true) return false;
+  if (!isDowned(target, now)) return false;
+  const range = opts.range ?? FINISH_RANGE;
+  const dx = attacker.x - target.pos.x;
+  const dy = attacker.y - target.pos.y;
+  return dx * dx + dy * dy <= range * range;
+}
+
+/** Apply a stun window. Returns a fresh state; the input is never mutated. */
+export function applyStun(
+  c: CombatantState,
+  now: number,
+  stunMs: number = THROW_STUN_MS,
+): { state: CombatantState; events: CombatEvent[] } {
+  const until = now + Math.max(0, stunMs);
+  return { state: { ...c, stunUntil: until }, events: [{ type: 'stun', targetId: c.id, until }] };
+}
+
+/** Hit-stop payload for a kill. The client freezes its sim this long. */
+export function hitStopEvent(targetId: number, durationMs: number = HIT_STOP_MS): CombatEvent {
+  return { type: 'hit-stop', targetId, durationMs: Math.max(0, Math.round(durationMs)) };
+}
+
+/** Finisher bonus XP (flat, on top of the normal kill payout). */
+export function finisherBonusXp(): number {
+  return FINISHER_BONUS_XP;
 }

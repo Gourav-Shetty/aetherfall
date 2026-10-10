@@ -880,7 +880,18 @@ net.onEvent = (kind, payload) => {
     // --- kills ---
     case 'mob-die': {
       const id = num('id');
-      if (id !== null) announcedDeaths.add(id);
+      if (id !== null) {
+        announcedDeaths.add(id);
+        // Combat feel: floor blood at the corpse + clear the crawl mark, for
+        // every kill no matter who landed it (world-visible decals).
+        const corpse = net.entities.get(id);
+        if (corpse && Number.isFinite(corpse.p.x) && Number.isFinite(corpse.p.y)) {
+          if (c2d) c2d.addBlood(corpse.p.x, corpse.p.y);
+          if (iso) iso.addBlood(corpse.p.x, corpse.p.y);
+        }
+        c2d?.clearDowned(id);
+        iso?.clearDowned(id);
+      }
       if (!forMe()) break;
       const killedBy = num('killedBy');
       const mine = killedBy === net.id;
@@ -892,6 +903,36 @@ net.onEvent = (kind, payload) => {
       } else {
         hud.addKill(`${nm} has fallen`);
       }
+      // Finishers hit harder (gated by reduced motion inside shake()).
+      if (p?.['finisher'] === true) shake(1.0);
+      break;
+    }
+    // --- close-quarters finish loop (server game/melee + ai/npc) ---
+    case 'mob-downed': {
+      const id = num('id');
+      if (id !== null) {
+        c2d?.markDowned(id);
+        iso?.markDowned(id);
+      }
+      break;
+    }
+    case 'mob-up': {
+      const id = num('id');
+      if (id !== null) {
+        c2d?.clearDowned(id);
+        iso?.clearDowned(id);
+      }
+      break;
+    }
+    case 'hit-stop': {
+      // Freeze-frame on kills, gated by reduced motion (same gate as shake;
+      // audio cues still play).
+      if (!a11y.motionEnabled()) break;
+      const ms = num('durationMs');
+      const dur = ms !== null ? Math.max(0, Math.min(500, ms)) : 90;
+      if (dur <= 0) break;
+      if (iso && activeMode === 'three') iso.hitStop(dur);
+      else if (c2d) c2d.hitStop(dur);
       break;
     }
     case 'mob-spawn':
@@ -960,7 +1001,21 @@ net.onEvent = (kind, payload) => {
         toast(i18n.t('toast.bossFelled', { name }), 3600);
         a11y.announce({ type: 'raw', text: i18n.t('toast.bossFelled', { name }) });
         sound.kill();
-        if (iso && activeMode === 'three') iso.shake(0.6);
+        // Combat feel: blood at the reported position + clear the crawl mark.
+        const bx = num('x');
+        const by = num('y');
+        if (bx !== null && by !== null) {
+          if (c2d) c2d.addBlood(bx, by);
+          if (iso) iso.addBlood(bx, by);
+        }
+        const bid = num('id');
+        if (bid !== null) {
+          c2d?.clearDowned(bid);
+          iso?.clearDowned(bid);
+        }
+        // Finishers hit harder (gated by reduced motion inside shake()).
+        if (p?.['finisher'] === true) shake(1.0);
+        else if (iso && activeMode === 'three') iso.shake(0.6);
         else if (c2d) c2d.shake(8);
       }
       break;

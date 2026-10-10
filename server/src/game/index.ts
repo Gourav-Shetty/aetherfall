@@ -14,11 +14,22 @@ import {
   type MeleeResolution,
   type Mob,
 } from './combat.js';
+import {
+  DOWNED_DURATION_MS,
+  DOWNED_RECOVER_FRAC,
+  FINISHER_BONUS_XP,
+  HIT_STOP_MS,
+  THROW_RANGE,
+  THROW_STUN_MS,
+  UNARMED_PICKUP_RANGE,
+} from '../systems/combat_ext.js';
+import { canFinishMob, isMobDowned } from './melee/downed.js';
+import { firstWeapon, inThrowRange, landingPos, pickupRadiusFor } from './melee/throw.js';
 import { getZone } from '@aetherfall/engine';
-import { createInventory, type Inventory, type Pickup } from './inventory.js';
-import { chunkKeyOf, createQuestState, onExplore, type QuestEvent, type QuestState } from './quests.js';
+import { createInventory, makePickup, removeItem, tryPickup, type Inventory, type Pickup } from './inventory.js';
+import { addXp, chunkKeyOf, createQuestState, onCollect, onExplore, type QuestEvent, type QuestState } from './quests.js';
 import { applyBossKillRewards, applyKillRewards } from './loot.js';
-import type { BossName } from './content.js';
+import { chainOnCollect, weaponDef, type BossName } from './content.js';
 import { GuildStore } from './guilds.js';
 import { ChatRateLimiter } from './chat.js';
 import { Spawner } from './spawner.js';
@@ -34,6 +45,7 @@ export * from './guilds.js';
 export * from './chat.js';
 export * from './spawner.js';
 export * from './mobs.js';
+export * from './melee/index.js';
 
 export type GameEvent = { kind: string; payload: unknown };
 
@@ -62,6 +74,16 @@ export type MeleeOptions = {
   rand?: () => number;
   /** Force crit on/off instead of rolling one. */
   crit?: boolean;
+  /**
+   * Projectile-equivalent swing (thrown sidearms, ranged skills). Knocks a
+   * target downed like melee but NEVER finishes a downed target — the killer
+   * must walk up and finish in person.
+   */
+  ranged?: boolean;
+  /** Extra loot rolls on a killing blow (tithe mask's extra-loot perk). */
+  bonusRolls?: number;
+  /** Extra finish reach in units (gallow-beak's swift-finish perk). */
+  finishBonus?: number;
 };
 
 export type MeleeResult =
@@ -76,10 +98,14 @@ export type MeleeResult =
       dealt: number;
       killed: boolean;
       crit: boolean;
-      /** Empty unless `killed` — see `creditKill`. */
+      /** This swing knocked the mob downed (a finisher is still required). */
+      downed?: boolean;
+      /** This swing finished a downed mob (instant kill + bonus XP). */
+      finished?: boolean;
+      /** Empty unless `killed` or `downed` — see `creditKill`. */
       events: GameEvent[];
     }
-  | { ok: false; reason: 'cooldown' | 'out-of-range' | 'no-target'; events: GameEvent[] };
+  | { ok: false; reason: 'cooldown' | 'out-of-range' | 'no-target' | 'downed'; events: GameEvent[] };
 
 /**
  * Resolve one authoritative player melee swing against world (spawner) mobs.
@@ -94,9 +120,12 @@ export type MeleeResult =
  * no target does NOT consume the cooldown, so mashing attack while walking up
  * to a mob still lands the first hit.
  *
- * A kill is paid out by `creditKill`. HP bookkeeping and the 5s respawn timer
- * live in `Spawner.damageMob`, so `tickGameplay`'s `updateRespawns` remains the
- * single respawn authority — no second timer was introduced.
+ * Lethal swings knock the mob DOWNED (3s crawl) instead of killing it — see
+ * game/melee/downed.ts. A follow-up melee swing on the downed mob inside
+ * finish reach FINISHes it (instant kill + bonus XP via `creditKill`). Ranged
+ * swings (`ranged:true`) knock down but refuse the finish (`reason:'downed'`),
+ * so the killer must walk up. An unanswered knockdown stands back up on the
+ * tick (`tickGameplay` recovery), never bleeding out on its own.
  */
 export function playerMeleeAttack(
   game: GameState,
@@ -114,11 +143,37 @@ export function playerMeleeAttack(
   }
 
   const range = opts.range ?? MELEE_RANGE;
+  const ranged = opts.ranged ?? false;
+  const rand = opts.rand ?? Math.random;
   const target = game.spawner.nearestMobWithin(player.x, player.y, range);
   if (!target) return { ok: false, reason: 'no-target', events: empty };
   // The grid query is a superset of the reach circle; confirm exactly.
   if (!inReachOf(player, target.pos, range)) {
     return { ok: false, reason: 'out-of-range', events: empty };
+  }
+
+  // FINISH branch: melee only, on a downed target inside finish reach.
+  // The swift-finish mask widens the execution window (finishBonus).
+  if (isMobDowned(target, now)) {
+    if (ranged || !canFinishMob(player, target, now, { range: range + (opts.finishBonus ?? 0) })) {
+      return { ok: false, reason: 'downed', events: empty };
+    }
+    // Consume the cooldown once the finishing swing is committed.
+    cd.lastAttackAt = now;
+    const fin = game.spawner.finishMob(target.id, now);
+    if (!fin) return { ok: false, reason: 'no-target', events: empty };
+    const events: GameEvent[] = creditKill(game, player, fin.mob, rand, { finisher: true, bonusRolls: opts.bonusRolls ?? 0 });
+    return {
+      ok: true,
+      mobId: fin.mob.id,
+      mobName: fin.mob.name,
+      dmg: 0,
+      dealt: 0,
+      killed: true,
+      crit: false,
+      finished: true,
+      events,
+    };
   }
 
   // Consume the cooldown only once a real swing is committed.
@@ -129,13 +184,46 @@ export function playerMeleeAttack(
     ...(opts.rand ? { rand: opts.rand } : {}),
     ...(opts.crit !== undefined ? { crit: opts.crit } : {}),
   });
+
+  // A lethal swing knocks DOWNED instead of killing: hp floored at 0, crawl
+  // timer armed, `mob-downed` announced. `damageMob` keeps its direct-kill
+  // semantics for non-melee callers, so this bypasses it on purpose.
+  if (res.dmg >= target.hp) {
+    const removed = target.hp;
+    const downed = game.spawner.downMob(target.id, now, DOWNED_DURATION_MS);
+    if (!downed) return { ok: false, reason: 'no-target', events: empty };
+    const events: GameEvent[] = [
+      {
+        kind: 'mob-downed',
+        payload: {
+          id: downed.id,
+          x: downed.pos.x,
+          y: downed.pos.y,
+          downedUntil: downed.downedUntil ?? now + DOWNED_DURATION_MS,
+        },
+      },
+    ];
+    return {
+      ok: true,
+      mobId: downed.id,
+      mobName: downed.name,
+      dmg: removed,
+      dealt: res.dmg,
+      killed: false,
+      crit: res.crit,
+      downed: true,
+      events,
+    };
+  }
+
   const hit = game.spawner.damageMob(target.id, res.dmg, now);
   if (!hit) return { ok: false, reason: 'no-target', events: empty };
 
   // `damageMob` already marked the corpse and armed the respawn timer, so the
   // payout runs through `creditKill` directly — routing it back through
   // `onMobKilled` would hit that function's already-dead guard and pay nothing.
-  const events: GameEvent[] = hit.killed ? creditKill(game, player, hit.mob, opts.rand ?? Math.random) : empty;
+  // (Unreachable via the downed bypass above, kept for non-melee callers.)
+  const events: GameEvent[] = hit.killed ? creditKill(game, player, hit.mob, rand, { bonusRolls: opts.bonusRolls ?? 0 }) : empty;
   return {
     ok: true,
     mobId: hit.mob.id,
@@ -252,13 +340,14 @@ export function onMobKilled(
   mobId: number,
   now: number,
   rand: () => number = Math.random,
+  opts: { bonusRolls?: number } = {},
 ): GameEvent[] {
   const mob = game.spawner.getMob(mobId);
   const player = game.players.get(playerId);
   if (!mob || !player) return [];
   // Guards double rewards: a mob that is already dead has been paid out.
   if (!game.spawner.killMob(mobId, now)) return [];
-  return creditKill(game, player, mob, rand);
+  return creditKill(game, player, mob, rand, { bonusRolls: opts.bonusRolls ?? 0 });
 }
 
 /**
@@ -267,16 +356,22 @@ export function onMobKilled(
  * mob inside `Spawner.damageMob` (the same call that reported the lethal hit),
  * and re-killing it here would be rejected as a corpse — so the melee path
  * calls this directly instead of round-tripping through `onMobKilled`.
+ *
+ * Finishers (`finisher:true`) pay FINISHER_BONUS_XP on top and flag the
+ * `mob-die` payload, so the client can shake harder. Every kill also emits a
+ * `hit-stop` event (HIT_STOP_MS) for the client's freeze frame.
  */
 function creditKill(
   game: GameState,
   player: GamePlayer,
   mob: Mob,
   rand: () => number,
+  opts: { finisher?: boolean; bonusRolls?: number } = {},
 ): GameEvent[] {
   const out: GameEvent[] = [];
   const playerId = player.id;
   const mobId = mob.id;
+  const finisher = opts.finisher === true;
   const zone = getZone(mob.pos.x, mob.pos.y, game.seed);
   const { questEvents, xp, drops, pickups } = applyKillRewards(
     player.quests,
@@ -286,11 +381,25 @@ function creditKill(
     mob.pos.x,
     mob.pos.y,
     rand,
+    opts.bonusRolls ?? 0,
   );
+  let totalXp = xp;
+  const bonusEvents: QuestEvent[] = finisher ? [...addXp(player.quests, FINISHER_BONUS_XP)] : [];
+  if (finisher) totalXp += FINISHER_BONUS_XP;
   game.pickups.push(...pickups);
-  out.push({ kind: 'mob-die', payload: { id: mobId, killedBy: playerId } });
-  out.push({ kind: 'xp-gain', payload: { playerId, amount: xp, level: player.quests.level, xpLeft: player.quests.xp } });
+  out.push({
+    kind: 'mob-die',
+    payload: finisher ? { id: mobId, killedBy: playerId, finisher: true } : { id: mobId, killedBy: playerId },
+  });
+  out.push({
+    kind: 'hit-stop',
+    payload: finisher
+      ? { durationMs: HIT_STOP_MS, mobId, finisher: true }
+      : { durationMs: HIT_STOP_MS, mobId },
+  });
+  out.push({ kind: 'xp-gain', payload: { playerId, amount: totalXp, level: player.quests.level, xpLeft: player.quests.xp } });
   for (const e of questEvents) out.push(questEvent(game, playerId, e));
+  for (const e of bonusEvents) out.push(questEvent(game, playerId, e));
   for (const pk of pickups) {
     out.push({
       kind: 'pickup-spawn',
@@ -307,6 +416,9 @@ function creditKill(
  * progression weapon) into corpse pickups, grants the flat BOSS_KILL_XP, and
  * emits the `boss-kill` achievement event alongside the usual quest/XP/pickup
  * events. Protocol-v1 safe: events only add `kind` payloads.
+ *
+ * Finishers (`finisher:true`) pay FINISHER_BONUS_XP on top and flag the
+ * payload. Every boss kill also emits `hit-stop` (HIT_STOP_MS).
  */
 export function onBossKilled(
   game: GameState,
@@ -315,27 +427,42 @@ export function onBossKilled(
   x: number,
   y: number,
   rand: () => number = Math.random,
+  opts: { finisher?: boolean; bonusRolls?: number } = {},
 ): GameEvent[] {
   const out: GameEvent[] = [];
   const player = game.players.get(playerId);
   if (!player) return out; // no credited killer (e.g. add damage) -> no payout
+  const finisher = opts.finisher === true;
   const { questEvents, xp, pickups, achievement } = applyBossKillRewards(
     player.quests,
     boss,
     x,
     y,
     rand,
+    opts.bonusRolls ?? 0,
   );
+  let totalXp = xp;
+  const bonusEvents: QuestEvent[] = finisher ? [...addXp(player.quests, FINISHER_BONUS_XP)] : [];
+  if (finisher) totalXp += FINISHER_BONUS_XP;
   game.pickups.push(...pickups);
   out.push({
     kind: 'boss-kill',
-    payload: { playerId, boss: achievement.boss, xp: achievement.xp, x, y },
+    payload: finisher
+      ? { playerId, boss: achievement.boss, xp: totalXp, x, y, finisher: true }
+      : { playerId, boss: achievement.boss, xp: achievement.xp, x, y },
+  });
+  out.push({
+    kind: 'hit-stop',
+    payload: finisher
+      ? { durationMs: HIT_STOP_MS, boss, finisher: true }
+      : { durationMs: HIT_STOP_MS, boss },
   });
   out.push({
     kind: 'xp-gain',
-    payload: { playerId, amount: xp, level: player.quests.level, xpLeft: player.quests.xp },
+    payload: { playerId, amount: totalXp, level: player.quests.level, xpLeft: player.quests.xp },
   });
   for (const e of questEvents) out.push(questEvent(game, playerId, e));
+  for (const e of bonusEvents) out.push(questEvent(game, playerId, e));
   for (const pk of pickups) {
     out.push({
       kind: 'pickup-spawn',
@@ -351,6 +478,147 @@ export function removePickup(game: GameState, pickupId: number): boolean {
   if (i < 0) return false;
   game.pickups.splice(i, 1);
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// Thrown sidearms + armed/unarmed pickup radius
+// ---------------------------------------------------------------------------
+
+export type ThrowOptions = {
+  /** Override the thrown weapon's own damage bonus (default: the weapon's). */
+  bonusDmg?: number;
+  /** Injected RNG for crits (tests/replay determinism). */
+  rand?: () => number;
+  /** Force crit on/off instead of rolling one. */
+  crit?: boolean;
+  /** Override throw reach (default THROW_RANGE; the long-throw mask adds +4). */
+  range?: number;
+};
+
+export type ThrowResult =
+  | {
+      ok: true;
+      /** True when a mob was hit (damage + stun applied). */
+      hit: boolean;
+      /** Hit mob id (null on a miss). */
+      mobId: number | null;
+      weaponId: string;
+      landing: { x: number; y: number };
+      /** World pickup id of the landed weapon (see `pickup-spawn`). */
+      pickupId: number;
+      events: GameEvent[];
+    }
+  | { ok: false; reason: 'no-player' | 'no-weapon'; events: GameEvent[] };
+
+/**
+ * Throw the first weapon in inventory: THROW_RANGE reach, melee-curve damage
+ * plus a THROW_STUN_MS stun, and the weapon lands as a world pickup at the
+ * throw's landing point (hit or miss — throwing always spends the weapon).
+ * Throws are ranged-equivalent: they knock downed but NEVER finish a downed
+ * target (downed mobs in the lane are ignored). Throws sit off the swing
+ * cooldown; the spent weapon is the cost.
+ */
+export function playerThrowWeapon(
+  game: GameState,
+  playerId: number,
+  now: number,
+  dx: number,
+  dy: number,
+  opts: ThrowOptions = {},
+): ThrowResult {
+  const empty: GameEvent[] = [];
+  const player = game.players.get(playerId);
+  if (!player) return { ok: false, reason: 'no-player', events: empty };
+  const wielded = firstWeapon(player.inv);
+  if (!wielded) return { ok: false, reason: 'no-weapon', events: empty };
+  const def = weaponDef(wielded.itemId);
+  const bonusDmg = opts.bonusDmg ?? def?.damage ?? 0;
+  const rand = opts.rand ?? Math.random;
+  const range = opts.range ?? THROW_RANGE;
+
+  // Spend the weapon first: the throw always costs it, hit or miss.
+  removeItem(player.inv, wielded.itemId, 1);
+
+  const landing = landingPos(player, dx, dy, range);
+  const thrown = makePickup(wielded.itemId, 1, landing.x, landing.y);
+  game.pickups.push(thrown);
+
+  const events: GameEvent[] = [
+    {
+      kind: 'weapon-throw',
+      payload: { playerId, weaponId: wielded.itemId, from: { x: player.x, y: player.y }, to: { ...landing } },
+    },
+  ];
+
+  let hit = false;
+  let mobId: number | null = null;
+  const target = game.spawner.nearestMobWithin(player.x, player.y, range);
+  if (target && inThrowRange(player, target.pos, range) && !isMobDowned(target, now)) {
+    hit = true;
+    mobId = target.id;
+    const res = resolveMeleeDamage(player.quests.level, target.name, {
+      bonusDmg,
+      rand,
+      ...(opts.crit !== undefined ? { crit: opts.crit } : {}),
+    });
+    game.spawner.stunMob(target.id, now, THROW_STUN_MS);
+    events.push({ kind: 'mob-stun', payload: { id: target.id, until: now + THROW_STUN_MS } });
+    if (res.dmg >= target.hp) {
+      const downed = game.spawner.downMob(target.id, now, DOWNED_DURATION_MS);
+      if (downed) {
+        events.push({
+          kind: 'mob-downed',
+          payload: {
+            id: downed.id,
+            x: downed.pos.x,
+            y: downed.pos.y,
+            downedUntil: downed.downedUntil ?? now + DOWNED_DURATION_MS,
+          },
+        });
+      }
+    } else {
+      game.spawner.damageMob(target.id, res.dmg, now);
+    }
+  }
+  // Downed targets in the lane are ignored: throws never finish.
+
+  events.push({
+    kind: 'pickup-spawn',
+    payload: { id: thrown.id, itemId: thrown.itemId, count: thrown.count, x: thrown.x, y: thrown.y },
+  });
+  return { ok: true, hit, mobId, weaponId: wielded.itemId, landing, pickupId: thrown.id, events };
+}
+
+/**
+ * Pickup radius for a player: full reach while armed, UNARMED_PICKUP_RANGE
+ * while unarmed. Pass the result into inventory.tryPickup.
+ */
+export function playerPickupRadius(game: GameState, playerId: number): number {
+  const p = game.players.get(playerId);
+  if (!p) return UNARMED_PICKUP_RANGE;
+  return pickupRadiusFor(p.inv);
+}
+
+/**
+ * Collect a world pickup with the armed/unarmed radius. On success removes
+ * the pickup, advances collect quests, and emits `pickup-collect` plus the
+ * usual quest events. Returns [] when unknown/far/full.
+ */
+export function collectPickup(game: GameState, playerId: number, pickupId: number): GameEvent[] {
+  const player = game.players.get(playerId);
+  if (!player) return [];
+  const pickup = game.pickups.find((p) => p.id === pickupId);
+  if (!pickup) return [];
+  const radius = pickupRadiusFor(player.inv);
+  const res = tryPickup(player.inv, pickup, player, radius);
+  if (!res.ok) return [];
+  removePickup(game, pickupId);
+  const out: GameEvent[] = [
+    { kind: 'pickup-collect', payload: { playerId, pickupId, itemId: pickup.itemId, count: pickup.count } },
+  ];
+  for (const e of onCollect(player.quests, pickup.count)) out.push(questEvent(game, playerId, e));
+  for (const e of chainOnCollect(player.quests, pickup.count)) out.push(questEvent(game, playerId, e));
+  return out;
 }
 
 function playerFighters(game: GameState): Fighter[] {
@@ -395,8 +663,15 @@ export function tickGameplay(game: GameState, now: number): GameEvent[] {
     out.push({ kind: 'mob-respawn', payload: { id, x: m?.pos.x, y: m?.pos.y } });
   }
 
+  // 2b. Downed recovery (3s crawl): unanswered knockdowns stand back up at
+  // partial HP instead of bleeding out. One `mob-up` per recovery.
+  const recovered = game.spawner.recoverDowned(now, DOWNED_RECOVER_FRAC);
+  for (const m of recovered) {
+    out.push({ kind: 'mob-up', payload: { id: m.id, x: m.pos.x, y: m.pos.y, hp: m.hp, maxHp: m.maxHp } });
+  }
+
   // 3. Aggro hysteresis -> events only on change.
-  const changed = updateAggro(mobs, playerFighters(game));
+  const changed = updateAggro(mobs, playerFighters(game), now);
   for (const id of changed) {
     const m = game.spawner.getMob(id);
     out.push({ kind: 'mob-aggro', payload: { id, targetId: m?.targetId ?? null } });

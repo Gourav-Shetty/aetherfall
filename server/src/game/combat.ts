@@ -23,6 +23,10 @@ export type Fighter = {
   level: number;
   /** Optional flat damage bonus (weapons/skills). Defaults to 0. */
   bonusDmg?: number;
+  /** ms timestamp until which the fighter is downed (crawls); 0/undefined = up. */
+  downedUntil?: number;
+  /** ms timestamp until which the fighter is stunned (no actions); 0/undefined = free. */
+  stunUntil?: number;
 };
 
 export type Mob = Fighter & {
@@ -161,11 +165,21 @@ export function updateRespawns(now: number, fighters: Fighter[], home?: (f: Figh
 /**
  * Aggro: each mob targets the nearest alive player within AGGRO_RANGE of the
  * mob, and drops the target beyond DEAGGRO_RANGE. Returns mob ids whose target changed.
+ *
+ * Downed and stunned mobs drop their target and acquire none while the timer
+ * runs (pass `now`; omitted = legacy behaviour, no downed/stun filtering).
  */
-export function updateAggro(mobs: Mob[], players: Fighter[]): number[] {
+export function updateAggro(mobs: Mob[], players: Fighter[], now?: number): number[] {
   const changed: number[] = [];
   for (const m of mobs) {
     if (!m.alive) {
+      if (m.targetId !== null) {
+        m.targetId = null;
+        changed.push(m.id);
+      }
+      continue;
+    }
+    if (now !== undefined && ((m.downedUntil ?? 0) > now || (m.stunUntil ?? 0) > now)) {
       if (m.targetId !== null) {
         m.targetId = null;
         changed.push(m.id);

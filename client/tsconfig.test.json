@@ -51,6 +51,7 @@
     "src/polish.test.ts",
     "src/assets.ts",
     "src/assets.test.ts",
-    "src/static.test.ts"
+    "src/static.test.ts",
+    "src/combat_feel.test.ts"
   ]
 }
