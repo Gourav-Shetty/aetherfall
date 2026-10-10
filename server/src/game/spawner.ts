@@ -368,15 +368,28 @@ export class Spawner {
    * knockback/forced moves, or spawned before this guard existed). Returns
    * removed ids. tickGameplay calls this after ensureAround so the safe discs
    * stay clear even for long-lived shards.
+   *
+   * PERF: this runs on the 20Hz gameplay hot path, so it must not scale with
+   * the size of the world. It walks the spatial index around each anchor
+   * (a handful of cells) rather than the whole mob map — a full scan here cost
+   * ~54ms on a tick with 18 players, because the previous version allocated a
+   * copy of every mob, once per player, per tick. A disc is 12u across and the
+   * anchors are >= 24u apart, so the per-anchor query sets cannot overlap; the
+   * `seen` set is belt-and-braces for a future that shrinks the separation.
    */
   pruneSpawnSafe(radius: number = SPAWN_SAFE_RADIUS): number[] {
+    const doomed = new Set<Mob>();
+    for (const p of SPAWN_SAFE_POINTS) {
+      this.forEachMobNear(p.x, p.y, radius, (m) => {
+        if (!m.alive || doomed.has(m)) return;
+        if (isSpawnSafeZone(m.pos.x, m.pos.y, radius)) doomed.add(m);
+      });
+    }
     const out: number[] = [];
-    for (const m of [...this.mobs.values()]) {
-      if (isSpawnSafeZone(m.pos.x, m.pos.y, radius)) {
-        this.unindex(m);
-        this.mobs.delete(m.id);
-        out.push(m.id);
-      }
+    for (const m of doomed) {
+      this.unindex(m);
+      this.mobs.delete(m.id);
+      out.push(m.id);
     }
     return out;
   }

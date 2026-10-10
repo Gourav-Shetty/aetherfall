@@ -726,15 +726,18 @@ function playerFighters(game: GameState): Fighter[] {
 export function tickGameplay(game: GameState, now: number): GameEvent[] {
   const out: GameEvent[] = [];
 
+  // PLAYABILITY: keep the spawn discs clear (knockback/legacy saves can
+  // still push a mob inside after spawnChunk filtered it). Once per tick, NOT
+  // per player: the guard is world state, so running it inside the player loop
+  // repeated identical work players-many times over on the 20Hz hot path.
+  game.spawner.pruneSpawnSafe();
+
   // 1. Ensure terrain around every player has mobs.
   for (const p of game.players.values()) {
     const fresh = game.spawner.ensureAround(p.x, p.y, 0);
     for (const m of fresh) {
       out.push({ kind: 'mob-spawn', payload: { id: m.id, name: m.name, x: m.pos.x, y: m.pos.y, hp: m.hp, maxHp: m.maxHp } });
     }
-    // PLAYABILITY: keep the spawn discs clear (knockback/legacy saves can
-    // still push a mob inside after spawnChunk filtered it).
-    game.spawner.pruneSpawnSafe();
     // Explorer quest: track distinct chunks beyond spawn.
     const key = chunkKeyOf(p.x, p.y);
     const evts: QuestEvent[] = onExplore(p.quests, p.seenChunks, key);
