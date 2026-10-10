@@ -162,7 +162,8 @@ essentially never met an AI-driven enemy.
    routes chase → `search`, which sweeps the last-known point at 2.0u/s and
    then stands down to patrol.
 5. **Spawn-safe discs** — three layers, all keyed off `isSpawnSafeZone` /
-   `SPAWN_SAFE_POINTS`:
+   `SPAWN_SAFE_POINTS` (which is the shared spawn-anchor table, one disc per
+   anchor — see "Spawn anchors" in docs/WORLD.md):
    - a step whose destination lands inside a 12u disc is **refused**, so no mob
      can be walked into the clear zone;
    - a player standing inside a disc is **not targetable**, so chasing one ends

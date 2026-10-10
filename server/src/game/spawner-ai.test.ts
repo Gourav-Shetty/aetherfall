@@ -442,10 +442,19 @@ describe('spawner AI: mobs are visibly alive', () => {
 
   it('most mobs in a chunk move on their own', () => {
     const { spawner, ai } = world();
-    const mobs = spawner.mobsList().slice(0, 6);
+    const anchor = spawner.mobsList()[0]!;
+    const px = anchor.pos.x + 24;
+    const py = anchor.pos.y;
+    // Sample the mobs the player actually WAKES: only mobs inside
+    // ACTIVE_RADIUS run a brain (that is the awake-budget contract), so the
+    // assertion is "most of the population in play moves". The old fixed
+    // `mobsList().slice(0, 6)` spanned three chunks and only passed while
+    // enough of those happened to sit near the probe player — with the spawn
+    // anchors in play, the first six are mostly sleepers by design.
+    const mobs = spawner.mobsWithin(px, py, ACTIVE_RADIUS).slice(0, 6);
+    assert.ok(mobs.length >= 4, `only ${mobs.length} mobs in play around (${px},${py})`);
     const before = new Map(mobs.map((m) => [m.id, { x: m.pos.x, y: m.pos.y }]));
-    const anchor = mobs[0]!;
-    for (let i = 0; i < 150; i++) ai.tick(DT, [view(anchor.pos.x + 24, anchor.pos.y)], T0 + i * 100);
+    for (let i = 0; i < 150; i++) ai.tick(DT, [view(px, py)], T0 + i * 100);
     const movedCount = mobs.filter(
       (m) => Math.hypot(m.pos.x - before.get(m.id)!.x, m.pos.y - before.get(m.id)!.y) > 1,
     ).length;

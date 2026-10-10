@@ -3,7 +3,16 @@
 // Names/levels come from content.ts per-zone spawn tables; HP from content.mobMaxHp
 // (zone-scaled for 3-5-hit TTK). Zone of a mob = getZone() at its world position.
 
-import { genChunk, getZone } from '@aetherfall/engine';
+// PLAYABILITY (spawn safety): the safe discs are DERIVED from the engine's
+// spawn-anchor table, which is the same list `Sim.addPlayer` places a joining
+// player on. One list, one radius — a spawn coordinate can never drift away
+// from the discs that are supposed to protect it (see engine/src/spawn-anchors.ts).
+import {
+  SPAWN_ANCHORS,
+  SPAWN_SAFE_RADIUS as ANCHOR_SAFE_RADIUS,
+  genChunk,
+  getZone,
+} from '@aetherfall/engine';
 import { mulberry32 } from '@aetherfall/shared';
 import { RESPAWN_DELAY_MS, makeMob, type Mob } from './combat.js';
 import {
@@ -19,15 +28,18 @@ export const MOB_NAMES = ['gloomfang', 'ashcrawler', 'thornback', 'mistwisp'] as
 
 /**
  * PLAYABILITY (spawn safety): no hostile spawns within this radius of any
- * spawn anchor. World spawn is (0,0) (see docs/WORLD.md zone map) and the
- * shrine respawn is (50,50) (server/src/index.ts death path). Both are
- * covered so a fresh bot is never boxed in on arrival.
+ * spawn anchor. The radius and the anchor list both come from the engine's
+ * spawn-anchor table (`engine/src/spawn-anchors.ts`) — the world spawn `(0,0)`,
+ * the shrine respawn `(50,50)` and the outlying rings are all covered, so a
+ * fresh bot is never boxed in on arrival and the list cannot drift away from
+ * the coordinates `Sim.addPlayer` actually uses.
  */
-export const SPAWN_SAFE_RADIUS = 12;
-export const SPAWN_SAFE_POINTS: ReadonlyArray<{ x: number; y: number }> = [
-  { x: 0, y: 0 },
-  { x: 50, y: 50 },
-];
+export const SPAWN_SAFE_RADIUS = ANCHOR_SAFE_RADIUS;
+/**
+ * Safe discs, derived from the shared anchors (identity, not a second copy):
+ * every anchor is a disc centre and vice versa.
+ */
+export const SPAWN_SAFE_POINTS: ReadonlyArray<{ x: number; y: number }> = SPAWN_ANCHORS;
 
 /** True when (x,y) lies inside a spawn-safe disc (no hostile spawns allowed). */
 export function isSpawnSafeZone(

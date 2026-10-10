@@ -2,6 +2,11 @@
 // Uses @aetherfall/engine World + SpatialHash. Gameplay systems plug in via hooks.
 import { World, SpatialHash } from '@aetherfall/engine';
 import { getBiome, getZone, tileFlagsFor, type TileFlags, type TileHazard } from '@aetherfall/engine';
+// PLAYABILITY (spawn safety): a joining player with no explicit position lands
+// ON a declared spawn anchor (round-robin by player id), which is exactly the
+// coordinate list the spawner keeps mob-free — the join path can no longer
+// disagree with the safe discs. See engine/src/spawn-anchors.ts.
+import { SHRINE_SPAWN, spawnAnchorFor } from '@aetherfall/engine';
 import { TERRAIN_SEED } from './terrain_sys.js';
 import type { EntitySnapshot } from '@aetherfall/shared';
 // WALLS: shared wall schema + slide collision (additive).
@@ -123,9 +128,22 @@ export class Sim {
     else this.postSystems.push(hook);
   }
 
+  /**
+   * Admit a player. With no explicit x/y they appear on the spawn anchor for
+   * their id (`SPAWN_ANCHORS[id % n]`, round-robin) so the live join path lands
+   * inside one of the spawner's no-mob discs; an explicit x/y (restore, test,
+   * scripted teleport) still wins, per axis, and `findFreeSpawn` still nudges
+   * the result out of walls / terrain.
+   *
+   * This used to be `10 + (id*7)%80` / `10 + (id*13)%80`, a scatter that put
+   * player 1 at (17,23) — 28.6u from the only two declared safe points, i.e.
+   * outside every spawn-safe disc while all the tests (which spawn at (0,0))
+   * still passed.
+   */
   addPlayer(id: number, name: string, x?: number, y?: number, nowMs: number = Date.now()): SimPlayer {
-    const px = x ?? 10 + (id * 7) % 80;
-    const py = y ?? 10 + (id * 13) % 80;
+    const anchor = spawnAnchorFor(id);
+    const px = x ?? anchor.x;
+    const py = y ?? anchor.y;
     const spawn = this.findFreeSpawn(px, py);
     // PLAYABILITY: spawn at full HP with 3s of protection (see protectedUntil).
     const p: SimPlayer = { id, name, x: spawn.x, y: spawn.y, vx: 0, vy: 0, hp: 100, maxHp: 100, seq: 0, z: 0, protectedUntil: nowMs + SPAWN_PROTECTION_MS };
@@ -187,11 +205,14 @@ export class Sim {
   }
 
   /**
-   * Respawn at full HP with fresh protection (shrine anchor 50,50 by default).
-   * Server death path calls this instead of mutating hp/pos inline so the
-   * protection window can never be forgotten on one of the two paths.
+   * Respawn at full HP with fresh protection (the shrine anchor by default —
+   * `SHRINE_SPAWN` from the shared spawn-anchor table, so the death path lands
+   * on a declared safe disc instead of a literal that could drift away from
+   * the spawner's list). Server death path calls this instead of mutating
+   * hp/pos inline so the protection window can never be forgotten on one of
+   * the two paths.
    */
-  respawnPlayer(id: number, x = 50, y = 50, nowMs: number = Date.now()): boolean {
+  respawnPlayer(id: number, x = SHRINE_SPAWN.x, y = SHRINE_SPAWN.y, nowMs: number = Date.now()): boolean {
     const p = this.players.get(id);
     if (!p) return false;
     p.hp = p.maxHp;

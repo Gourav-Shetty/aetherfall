@@ -774,8 +774,15 @@ wss.on('connection', (ws) => {
         }
         pid = nextId++;
         if (hm.token) tokensByPid.set(pid, hm.token);
+        // PLAYABILITY (spawn safety): no x/y here on purpose — `Sim.addPlayer`
+        // places the player on the declared spawn anchor for this id, which is
+        // the same list `game/spawner.ts` keeps free of hostile spawns (12u
+        // disc per anchor). Passing coordinates at the join site would be a
+        // second source of truth for "where does a new player appear", which is
+        // exactly how the join path ended up outside every safe disc.
         const p = sim.addPlayer(pid, ident.name);
-        // restore persisted pos/hp if known
+        // Persisted players keep their saved position (restores win over the
+        // anchor, as before) — the anchor table only governs a fresh spawn.
         try {
           const saved = db.getPlayer(pid);
           if (saved) {
@@ -1213,7 +1220,9 @@ function tickOnce(): void {
         if (!p || p.hp <= 0) continue;
         if (!sim.damagePlayer(e.targetId, e.amount, Date.now())) continue;
         if (p.hp <= 0) {
-          sim.respawnPlayer(p.id, 50, 50, Date.now());
+          // No coordinates: respawnPlayer returns the player to the shared
+          // shrine spawn anchor (a declared safe disc), same as a fresh join.
+          sim.respawnPlayer(p.id);
           broadcast({ t: 'event', kind: 'respawn', payload: { id: p.id } });
         }
       } else if (e.kind === 'telegraph') {
@@ -1239,7 +1248,7 @@ function tickOnce(): void {
       if (!p || p.hp <= 0) continue;
       if (!sim.damagePlayer(e.targetId, e.amount, Date.now())) continue;
       if (p.hp <= 0) {
-        sim.respawnPlayer(p.id, 50, 50, Date.now());
+        sim.respawnPlayer(p.id);
         broadcast({ t: 'event', kind: 'respawn', payload: { id: p.id } });
       }
     }

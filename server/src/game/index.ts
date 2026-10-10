@@ -25,7 +25,7 @@ import {
 } from '../systems/combat_ext.js';
 import { canFinishMob, isMobDowned } from './melee/downed.js';
 import { firstWeapon, inThrowRange, landingPos, pickupRadiusFor } from './melee/throw.js';
-import { getZone } from '@aetherfall/engine';
+import { getZone, spawnAnchorFor } from '@aetherfall/engine';
 import { createInventory, makePickup, removeItem, tryPickup, type Inventory, type Pickup } from './inventory.js';
 import { addXp, chunkKeyOf, createQuestState, onCollect, onExplore, type QuestEvent, type QuestState } from './quests.js';
 import { applyBossKillRewards, applyKillRewards } from './loot.js';
@@ -326,7 +326,15 @@ export function createGameState(seed = 1337): GameState {
   };
 }
 
-export function ensurePlayer(game: GameState, id: number, name: string, x = 0, y = 0): GamePlayer {
+/**
+ * Register / refresh a gameplay player. With no explicit x/y the default is the
+ * SAME spawn anchor `Sim.addPlayer` uses for that id (`SPAWN_ANCHORS[id % n]`)
+ * — the gameplay layer can no longer default to a magic coordinate that the
+ * spawner's safe discs do not cover (it used to be a bare `(0,0)` literal, and
+ * the real join path used to bypass this function entirely with a different
+ * coordinate again).
+ */
+export function ensurePlayer(game: GameState, id: number, name: string, x = spawnAnchorFor(id).x, y = spawnAnchorFor(id).y): GamePlayer {
   let p = game.players.get(id);
   if (!p) {
     p = { id, name, x, y, inv: createInventory(), quests: createQuestState(), seenChunks: new Set() };

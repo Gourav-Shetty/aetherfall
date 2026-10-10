@@ -35,6 +35,7 @@ import {
   type P2Baseline,
 } from '@aetherfall/shared/dist/protocol2.js';
 import type { EntitySnapshot } from '@aetherfall/shared';
+import { TICK_HZ } from '@aetherfall/shared';
 
 /** 1/16 unit quantization: the largest legal v2 position error. */
 const POS_TOL = 1 / 16 + 1e-9;
@@ -236,6 +237,36 @@ function nonPlayers(map: Map<number, EntitySnapshot>): [number, EntitySnapshot][
   return [...map.entries()].filter(([, e]) => e.kind !== 'player').sort((a, b) => a[0] - b[0]);
 }
 
+/**
+ * Walk a client onto (tx,ty) with ordinary JSON inputs, then let it coast to a
+ * stop. Phase 1 compares the two clients' non-player entity sets for EQUALITY,
+ * which is only meaningful while both sit inside the same interest disc
+ * (INTEREST_RADIUS) — and fresh joins are deliberately placed on different
+ * spawn anchors now (`Sim.addPlayer` -> `spawnAnchorFor(id)`), so the two
+ * clients start ~40u apart. Co-locating them first makes the phase-1
+ * precondition explicit instead of accidentally true.
+ */
+async function walkTo(c: TestClient, tx: number, ty: number, budgetMs = 20000): Promise<void> {
+  let seq = 0;
+  const stop = Date.now() + budgetMs;
+  while (Date.now() < stop) {
+    const me = c.entities.get(c.selfId);
+    if (!me) {
+      await sleep(50);
+      continue;
+    }
+    const dx = tx - me.p.x;
+    const dy = ty - me.p.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist < 1.5) break;
+    c.ws.send(
+      JSON.stringify({ t: 'input', input: { seq: ++seq, dt: 1 / TICK_HZ, move: { x: dx / dist, y: dy / dist } } }),
+    );
+    await sleep(50);
+  }
+  await sleep(400); // friction brings the body to rest before the comparison
+}
+
 function assertSameWorld(
   tick: number,
   mine: [number, EntitySnapshot][],
@@ -294,6 +325,15 @@ describe('protocol v2 negotiated end-to-end', () => {
         assert.equal(v1.jsonFrames > 0, true);
         assert.ok(v2.selfId > 0 && v1.selfId > 0);
         const jsonAfterWelcome = v2.jsonFrames;
+
+        // ---- phase 0: co-locate (fresh joins land on different spawn anchors)
+        const v2self = v2.entities.get(v2.selfId)!;
+        await walkTo(v1, v2self.p.x, v2self.p.y);
+        const v1self = v1.entities.get(v1.selfId)!;
+        assert.ok(
+          Math.hypot(v1self.p.x - v2self.p.x, v1self.p.y - v2self.p.y) < 2,
+          `clients did not meet: v1 (${v1self.p.x.toFixed(1)},${v1self.p.y.toFixed(1)}) vs v2 (${v2self.p.x.toFixed(1)},${v2self.p.y.toFixed(1)})`,
+        );
 
         // ---- phase 1: both idle, so both interest sets are identical ----
         let compared = 0;

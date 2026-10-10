@@ -41,8 +41,11 @@ A fresh login must not land inside a mob pile, and the first ten seconds must
 not end in a death screen with no warning. Three rules enforce that:
 
 - **No hostile spawns in the safe discs.** `spawnChunk` skips any mob inside
-  `SPAWN_SAFE_RADIUS` (12u) of a spawn anchor — world spawn `(0,0)` and the
-  shrine `(50,50)` — so the clear zone holds by construction.
+  `SPAWN_SAFE_RADIUS` (12u) of a spawn anchor. The anchors are one shared table
+  (`engine/src/spawn-anchors.ts`): world spawn `(0,0)`, the shrine `(50,50)` and
+  four outlying rings — the same list `Sim.addPlayer` places a joining player
+  on, so the clear zone holds **by construction** rather than by two hand-kept
+  lists agreeing. See "Spawn anchors" in docs/WORLD.md.
   `pruneSpawnSafe()` runs each tick as a backstop for knockback or legacy
   saves that pushed a mob back inside.
 - **3s of spawn protection** (`SPAWN_PROTECTION_MS`) on join and on respawn.

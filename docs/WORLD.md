@@ -32,6 +32,60 @@ Helpers: `getZone(x, y, seed)`, `zoneForChunk(cx, cy, ...)`, `zoneTileKind()`,
 `zoneWallKind()`, `genZonedChunk()` (walkability + decoration variants),
 `genThemedDungeon()` / `dungeonTileKind()` (instanced-dungeon dressing).
 
+## Spawn anchors (one table, read by both sides)
+
+Ownership: `engine/src/spawn-anchors.ts` — the **single source of truth** for
+where a player can appear and where hostiles may not spawn. The sim and the
+spawner both import it, so the join path and the safe discs cannot drift apart
+again.
+
+| Anchor | x | y | Role |
+| ------ | - | - | ---- |
+| `origin` | 0 | 0 | World spawn (zone-map centre, radial `r`) |
+| `shrine` | 50 | 50 | Death respawn (`Sim.respawnPlayer` default) |
+| `west-meadow` | 12 | 38 | Meadow ring, west of the origin |
+| `south-meadow` | 44 | 14 | Meadow ring, south shore |
+| `east-ridge` | 88 | 48 | Dungeon-band ridge, east |
+| `north-ridge` | 50 | 88 | North ridge between the two arena fixtures |
+
+Readers:
+
+- `Sim.addPlayer(id, name)` with **no** x/y places the player on
+  `SPAWN_ANCHORS[id % 6]` (`spawnAnchorFor(id)`) — this is the live join path
+  (`server/src/index.ts`). An explicit x/y still wins, per axis, and
+  `findFreeSpawn` still nudges the body out of walls/terrain.
+- `game/spawner.ts` derives `SPAWN_SAFE_POINTS = SPAWN_ANCHORS` (identity, not a
+  copy) and keeps `SPAWN_SAFE_RADIUS = 12`. `spawnChunk` refuses to place a
+  hostile inside a disc, `pruneSpawnSafe()` re-clears them each tick, and
+  `spawner-ai` refuses to step / hunt / sweep into one.
+- `game/index.ts` `ensurePlayer(game, id, name)` defaults to the same
+  `spawnAnchorFor(id)` instead of a literal.
+- Persisted players are **exempt**: the join path overwrites `p.x/p.y` from
+  `db.getPlayer(pid)` right after admission, and that restore always wins.
+
+Invariants (asserted in `server/src/game/spawn-anchors.test.ts`):
+
+1. `(0,0)` and `(50,50)` stay in the table — docs, the respawn path and old saves
+   hard-code them.
+2. Every anchor is **>= `BOSS_WAKE_RANGE` (30u)** from every boss roost
+   `(80,80) (20,80) (86,16) (14,86)`, so standing on an anchor never wakes a
+   dormant boss, and >= 14u (legacy minion aggro) from `(30,30) (65,25) (50,70)`.
+   Boss roosts and their 30u wake discs are deliberately anchor-free.
+3. Anchors are **>= `2 * SPAWN_SAFE_RADIUS` (24u)** apart — the closest pair is
+   36.5u, so two discs can never merge into one oversized no-mob region.
+4. Every anchor is a free spot on the default terrain field (dry ground), so
+   `findFreeSpawn` never pushes a joining player off its own disc.
+5. Coverage stays modest: the six discs are **27%** of the 100x100 arena and the
+   spawner still keeps **83%** of its mobs there (53 of 64 over the full 4x4
+   chunks); every chunk of the arena keeps at least two.
+
+What it replaced: `Sim.addPlayer` used to scatter players with
+`10 + (id*7)%80` / `10 + (id*13)%80`. Player 1 landed at `(17,23)` — 28.6u from
+the origin, outside both declared safe points — while every spawn-safety test
+passed because they all spawned at the protected `(0,0)`. The feature was dead
+in production; the table above makes the spawn coordinate and the disc that
+protects it the same fact.
+
 ## Mob spawn tables (`MOB_SPAWN_TABLE`)
 
 | Zone | Mob | Lv | Wt |
