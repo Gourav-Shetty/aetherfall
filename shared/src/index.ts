@@ -1,4 +1,5 @@
 // @aetherfall/shared — protocol v1, types, seeded RNG, codec
+export * from './catalog.js';
 export const PROTOCOL_VERSION = 1;
 export const TICK_HZ = 20;
 export const SNAPSHOT_HZ = 10;

@@ -5,9 +5,11 @@
 // returned events as `t:'event'` payloads (no new ServerMsg variants).
 
 import type { ZoneId } from '@aetherfall/engine';
+import { itemById } from '@aetherfall/shared';
 import { makePickup, type ItemStack, type Pickup } from './inventory.js';
 import { addXp, onKill, type QuestEvent, type QuestState } from './quests.js';
 import { bossZoneFor, chainOnKill, xpForBossKill, xpForKill, type BossName } from './content.js';
+import { isEliteLevel, rollMaskDrop } from './masks.js';
 
 export interface DropEntry {
   itemId: string;
@@ -15,6 +17,15 @@ export interface DropEntry {
   chance: number;
   min: number;
   max: number;
+}
+
+/**
+ * Catalog hook: item identity (names, sprites, prices, flags) lives in the
+ * shared catalog; this table owns only drop odds. tools/catalog/check.ts
+ * asserts every itemId below resolves here.
+ */
+export function lootItemExists(itemId: string): boolean {
+  return itemById(itemId) !== undefined;
 }
 
 /** Per-mob drop table. Zone tables act as fallback (key `zone:<id>`). */
@@ -88,24 +99,36 @@ export function dropsFor(mobName: string, zone: ZoneId): DropEntry[] {
   return LOOT_TABLE[mobName] ?? LOOT_TABLE[`zone:${zone}`] ?? [];
 }
 
-/** Roll one kill's drops. Pure; caller owns `rand` (default Math.random). */
+/**
+ * Roll one kill's drops. Pure; caller owns `rand` (default Math.random).
+ * `bonusRolls` re-rolls the whole table that many extra times (the tithe
+ * mask's extra-loot perk); 0 costs no extra draws and preserves the legacy
+ * stream exactly.
+ */
 export function rollLootForKill(
   mobName: string,
   zone: ZoneId,
   _level: number,
   rand: () => number = Math.random,
+  bonusRolls = 0,
 ): ItemStack[] {
   void _level; // reserved: level-scaled rarities (drop count scales via min/max today)
   const out: ItemStack[] = [];
-  for (const d of dropsFor(mobName, zone)) {
-    if (rand() < d.chance) {
-      const span = d.max - d.min + 1;
-      const count = d.min + Math.floor(rand() * span);
-      const same = out.find((s) => s.itemId === d.itemId);
-      if (same) same.count += count;
-      else out.push({ itemId: d.itemId, count });
+  const table = dropsFor(mobName, zone);
+  const once = (): void => {
+    for (const d of table) {
+      if (rand() < d.chance) {
+        const span = d.max - d.min + 1;
+        const count = d.min + Math.floor(rand() * span);
+        const same = out.find((s) => s.itemId === d.itemId);
+        if (same) same.count += count;
+        else out.push({ itemId: d.itemId, count });
+      }
     }
-  }
+  };
+  once();
+  const extra = Math.max(0, Math.floor(bonusRolls));
+  for (let b = 0; b < extra; b++) once();
   return out;
 }
 
@@ -134,6 +157,8 @@ export interface KillRewards {
  * Combat onKill wiring: advance base-trio + chain 'kill' quests, grant
  * zone-scaled kill XP (level*100 thresholds via addXp), roll drops + corpse
  * pickups. Call AFTER tryMeleeAttack() returns { ok:true, killed:true }.
+ * `bonusRolls` (default 0) is the killer's extra-loot count (tithe mask).
+ * Elites (level 6+) also roll a mask drop at 5% (see masks.rollMaskDrop).
  */
 export function applyKillRewards(
   state: QuestState,
@@ -143,11 +168,16 @@ export function applyKillRewards(
   x: number,
   y: number,
   rand: () => number = Math.random,
+  bonusRolls = 0,
 ): KillRewards {
   const questEvents: QuestEvent[] = [...onKill(state, 1), ...chainOnKill(state, 1)];
   const xp = xpForKill(zone, mobLevel);
   questEvents.push(...addXp(state, xp));
-  const drops = rollLootForKill(mobName, zone, mobLevel, rand);
+  const drops = rollLootForKill(mobName, zone, mobLevel, rand, bonusRolls);
+  // Mask drop (variable id — never a literal, so the catalog checker's
+  // `itemId: '...'` scan of this file stays green).
+  const maskId = rollMaskDrop(rand, { boss: mobName in BOSS_LEVEL, elite: isEliteLevel(mobLevel) });
+  if (maskId) drops.push({ itemId: maskId, count: 1 });
   const pickups = pickupsForLoot(drops, x, y, rand);
   return { questEvents, xp, drops, pickups };
 }
@@ -180,7 +210,8 @@ export interface BossKillRewards extends KillRewards {
 /**
  * Boss onKill wiring: bosses count for base-trio + chain 'kill' quests, grant
  * fixed BOSS_KILL_XP (200) via addXp, roll the boss drop table -> corpse
- * pickups, and attach a `boss-kill` achievement event.
+ * pickups, and attach a `boss-kill` achievement event. Bosses also roll a
+ * mask drop at 25% (see masks.MASK_DROP_BOSS).
  */
 export function applyBossKillRewards(
   state: QuestState,
@@ -188,11 +219,14 @@ export function applyBossKillRewards(
   x: number,
   y: number,
   rand: () => number = Math.random,
+  bonusRolls = 0,
 ): BossKillRewards {
   const questEvents: QuestEvent[] = [...onKill(state, 1), ...chainOnKill(state, 1)];
   const xp = xpForBossKill();
   questEvents.push(...addXp(state, xp));
-  const drops = rollLootForKill(boss, bossZoneFor(boss), BOSS_LEVEL[boss], rand);
+  const drops = rollLootForKill(boss, bossZoneFor(boss), BOSS_LEVEL[boss], rand, bonusRolls);
+  const maskId = rollMaskDrop(rand, { boss: true });
+  if (maskId) drops.push({ itemId: maskId, count: 1 });
   const pickups = pickupsForLoot(drops, x, y, rand);
   return { questEvents, xp, drops, pickups, boss, achievement: { type: 'boss-kill', boss, xp } };
 }

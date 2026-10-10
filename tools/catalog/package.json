@@ -1,0 +1,22 @@
+{
+  "name": "@aetherfall/catalog",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/check.js",
+  "types": "./dist/check.d.ts",
+  "description": "Catalog integrity checker: validates the shared item catalog and its loot/vendor/quest references",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --test dist/**/*.test.js",
+    "check": "node dist/check.js"
+  },
+  "dependencies": {
+    "@aetherfall/shared": "0.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.0",
+    "typescript": "^5.6.0"
+  }
+}

@@ -5,6 +5,8 @@
 
 import type { ZoneId } from '@aetherfall/engine';
 import { getZone as engineGetZone } from '@aetherfall/engine';
+import { CATALOG, type CatalogItemDef } from '@aetherfall/shared';
+import { MASK_IDS, isMaskId, maskDef } from './masks.js';
 import { addXp, type QuestEvent, type QuestProgress, type QuestState } from './quests.js';
 
 export type { ZoneId };
@@ -141,8 +143,13 @@ export function rollSpawnForZone(
 // ---------------------------------------------------------------------------
 // Items (10) + weapons (5 with stats)
 // ---------------------------------------------------------------------------
+// MIGRATED onto the shared catalog (shared/src/catalog.ts): the catalog owns
+// every number (price buy, attack, heal, levelReq), every sprite ref and every
+// flag. This module keeps the legacy ITEMS / WEAPONS views and the ItemDef /
+// WeaponDef shapes so combat, loot, vendor and quest callers are untouched.
+// Do NOT add items here — add them to CATALOG_ITEMS (see docs/CATALOG.md).
 
-export type ItemKind = 'consumable' | 'material' | 'quest' | 'weapon';
+export type ItemKind = 'consumable' | 'material' | 'quest' | 'weapon' | 'mask';
 
 export interface ItemDef {
   id: string;
@@ -155,19 +162,28 @@ export interface ItemDef {
   heal?: number;
 }
 
+function legacyKindOf(c: CatalogItemDef): ItemKind {
+  if (c.slot === 'mainhand') return 'weapon';
+  if (c.flags.questItem === true) return 'quest';
+  if (c.slot === 'consumable' || c.stats.heal !== undefined) return 'consumable';
+  return 'material';
+}
+
+function toLegacyItem(c: CatalogItemDef): ItemDef {
+  return {
+    id: c.id,
+    name: c.name,
+    kind: legacyKindOf(c),
+    description: c.description,
+    price: c.price.buy,
+    ...(c.stats.heal !== undefined ? { heal: c.stats.heal } : {}),
+  };
+}
+
 /** 10 stackable world items (materials, consumables, quest tokens). */
-export const ITEMS: ItemDef[] = [
-  { id: 'ember-shard', name: 'Ember Shard', kind: 'material', description: 'Warm glass from the ward-stones. Quest & crafting stock.', price: 5 },
-  { id: 'gloom-fang', name: 'Gloom Fang', kind: 'material', description: 'Trophy tooth. Proof of meadow culls.', price: 4 },
-  { id: 'moss-cap', name: 'Moss Cap', kind: 'material', description: 'Deep-highland fungus, alchemists pay well.', price: 6 },
-  { id: 'healing-herb', name: 'Healing Herb', kind: 'consumable', description: 'Chewy meadow greens. Restores 25 HP.', price: 8, heal: 25 },
-  { id: 'minor-potion', name: 'Minor Potion', kind: 'consumable', description: 'Maren\'s brew. Restores 50 HP.', price: 15, heal: 50 },
-  { id: 'mana-mote', name: 'Mana Mote', kind: 'material', description: 'Wisp residue. Faintly humming.', price: 7 },
-  { id: 'iron-ore', name: 'Iron Ore', kind: 'material', description: 'Highland pickings for the smith.', price: 6 },
-  { id: 'ash-coal', name: 'Ash Coal', kind: 'material', description: 'Caldera fuel. Burns blue-white.', price: 9 },
-  { id: 'obsidian-chip', name: 'Obsidian Chip', kind: 'material', description: 'Volcano glass. Sharp enough to shave with.', price: 12 },
-  { id: 'ward-token', name: 'Ward Token', kind: 'quest', description: 'Elder Maren\'s mark. Merchants trade fair with its bearer.', price: 0 },
-];
+export const ITEMS: ItemDef[] = CATALOG.items
+  .filter((c) => c.slot !== 'mainhand')
+  .map(toLegacyItem);
 
 export interface WeaponDef extends ItemDef {
   kind: 'weapon';
@@ -179,25 +195,51 @@ export interface WeaponDef extends ItemDef {
   zone: ZoneId;
 }
 
+function toLegacyWeapon(c: CatalogItemDef): WeaponDef {
+  return {
+    ...toLegacyItem(c),
+    kind: 'weapon',
+    damage: c.stats.attack ?? 0,
+    levelReq: c.stats.levelReq ?? 1,
+    zone: c.zone ?? 'meadow',
+  };
+}
+
 /** 5 weapons, damage-bonus progression +4 .. +12. */
-export const WEAPONS: WeaponDef[] = [
-  { id: 'wisp-touched-dagger', name: 'Wisp-Touched Dagger', kind: 'weapon', description: 'Fast, faintly glowing. Starter sidearm.', price: 20, damage: 4, levelReq: 1, zone: 'meadow' },
-  { id: 'ward-blade', name: 'Ward Blade', kind: 'weapon', description: 'Maren\'s armory blade. Reward for lighting the ward-stones.', price: 40, damage: 6, levelReq: 1, zone: 'meadow' },
-  { id: 'ember-axe', name: 'Ember Axe', kind: 'weapon', description: 'Highland steel with a coal-red edge.', price: 80, damage: 8, levelReq: 3, zone: 'dungeon' },
-  { id: 'deep-halberd', name: 'Deep Halberd', kind: 'weapon', description: 'Hollow-knight polearm, reforged for hands.', price: 120, damage: 10, levelReq: 4, zone: 'dungeon' },
-  { id: 'caldera-greatsword', name: 'Caldera Greatsword', kind: 'weapon', description: 'Obsidian-edged slab from the volcano heart.', price: 200, damage: 12, levelReq: 5, zone: 'volcano' },
-];
+export const WEAPONS: WeaponDef[] = CATALOG.items
+  .filter((c) => c.slot === 'mainhand')
+  .map(toLegacyWeapon);
 
 export function itemDef(id: string): ItemDef | WeaponDef | undefined {
-  return WEAPONS.find((w) => w.id === id) ?? ITEMS.find((i) => i.id === id);
+  return WEAPONS.find((w) => w.id === id) ?? ITEMS.find((i) => i.id === id) ?? maskItemDef(id);
 }
 
 export function weaponDef(id: string): WeaponDef | undefined {
   return WEAPONS.find((w) => w.id === id);
 }
 
-/** All droppable/lootable ids (items + weapons). */
-export const ALL_ITEM_IDS: string[] = [...ITEMS.map((i) => i.id), ...WEAPONS.map((w) => w.id)];
+/** All droppable/lootable ids (items + weapons + masks). */
+export const ALL_ITEM_IDS: string[] = [...ITEMS.map((i) => i.id), ...WEAPONS.map((w) => w.id), ...MASK_IDS];
+
+// ---------------------------------------------------------------------------
+// Masks (8 wearable relics, one equip slot — owned by game/masks.ts)
+// ---------------------------------------------------------------------------
+// Masks live outside the shared catalog (which pins exactly 15 items) and
+// outside ITEMS/WEAPONS (pinned at 10/5 by content.test.ts). This section is
+// a thin legacy view so vendor, loot-container and lookup callers resolve
+// mask ids exactly like any other item.
+
+export function maskItemDef(id: string): ItemDef | undefined {
+  const m = maskDef(id);
+  if (!m) return undefined;
+  // Look up the perk text from the mask itself so the two can never drift.
+  return { id: m.id, name: m.name, kind: 'mask', description: m.description, price: m.price };
+}
+
+/** True when `id` is one of the 8 wearable masks. */
+export function isMaskItem(id: string): boolean {
+  return isMaskId(id);
+}
 
 // ---------------------------------------------------------------------------
 // Quest chain (5, linear) with Elder Maren dialogue hooks
