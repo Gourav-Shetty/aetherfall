@@ -17,6 +17,7 @@ import {
   type VendorStore,
   esc,
 } from './social.js';
+import { MASK_GLYPHS } from './masks.js';
 
 export const PANEL_CSS = `
 /* ---------- systems panels (additive, dark-fantasy glass) ---------- */
@@ -56,6 +57,14 @@ export const PANEL_CSS = `
 .af-node.maxed{border-color:#e8c66a;box-shadow:0 0 8px rgba(232,198,106,.3)}
 .af-node .af-rank{color:#ffe066;font-size:11px;white-space:nowrap}
 .af-node .af-desc{color:#8fa3bf;font-size:10px}
+/* vocation + mask pickers (choice UI inside the talent panel) */
+.af-pickhead{font-size:10px;letter-spacing:2px;color:#e8c66a;margin:6px 0 3px}
+.af-pick{display:grid;grid-template-columns:1fr auto;gap:6px;align-items:center;padding:3px 5px;margin-top:3px;
+  background:rgba(13,19,38,.7);border:1px solid rgba(77,195,255,.25);border-radius:8px;cursor:pointer;min-height:32px}
+.af-pick:hover{border-color:#4dc3ff}
+.af-pick.sel{border-color:#e8c66a;box-shadow:0 0 8px rgba(232,198,106,.3)}
+.af-pick.noclick{cursor:default}
+.af-pick .af-desc{color:#8fa3bf;font-size:10px}
 /* emote bubbles (world-space overlay, not in the panel stack) */
 .af-bubble{position:absolute;transform:translate(-50%,-100%);pointer-events:none;font-size:20px;line-height:1;
   text-shadow:0 1px 3px #000;animation:afBubbleIn .18s ease-out}
@@ -321,9 +330,11 @@ export class VendorPanel {
         const arrowCls = r.index > 0.05 ? 'up' : r.index < -0.05 ? 'down' : '';
         const sell = r.sell > 0 ? `${r.sell}g` : 'n/a';
         const title = r.blocked ? `${r.itemId} — ${r.blocked}` : `${r.itemId} — base ${r.basePrice}g`;
+        // Mask rows wear their glyph (see client/src/masks.ts).
+        const glyph = r.kind === 'mask' ? `${MASK_GLYPHS[r.itemId] ?? '◇'} ` : '';
         return (
           `<div class="${cls}" title="${esc(title)}">` +
-          `<span>${esc(r.name)} <span class="af-qty">x${r.held}</span></span>` +
+          `<span>${glyph}${esc(r.name)} <span class="af-qty">x${r.held}</span></span>` +
           `<span class="af-price ${arrowCls}">${r.buy}g ${priceArrow(r.index)}</span>` +
           `<span class="af-price">sell ${sell}</span>` +
           '</div>'
@@ -346,10 +357,12 @@ const BRANCH_COLOUR: Record<string, string> = {
 };
 
 /**
- * The 3-branch talent tree. Clicking a node calls `onSpend(nodeId)` — the
- * caller sends `/talent <nodeId>`; the server is the only authority, so the
- * panel never mutates ranks locally. Locked and maxed nodes render as
- * non-actionable so the click target matches the server's own rules.
+ * The 3-branch talent tree, plus the calling + mask pickers. Clicking a node
+ * calls `onSpend(nodeId)` — the caller sends `/talent <nodeId>`; the server
+ * is the only authority, so the panel never mutates ranks locally. Locked and
+ * maxed nodes render as non-actionable so the click target matches the
+ * server's own rules. Picker clicks call `onAction` (`/vocation <id>` or
+ * `/mask equip <id>`); without it the pickers render as read-only.
  */
 export class TalentPanel {
   readonly el: HTMLElement;
@@ -361,6 +374,7 @@ export class TalentPanel {
     parent: HTMLElement,
     private store: ProgressionStore,
     private onSpend: (nodeId: string) => void,
+    private onAction?: (command: string) => void,
   ) {
     injectCss(parent);
     const root = panelShell(parent, 'af-talents', 'TALENTS');
@@ -374,6 +388,15 @@ export class TalentPanel {
     root.appendChild(this.body);
     this.el.addEventListener('click', (e) => {
       const hit = e.target as HTMLElement | null;
+      const pick = hit?.closest?.('[data-voc],[data-mask]') as HTMLElement | null;
+      if (pick) {
+        if (!this.onAction) return;
+        const voc = pick.getAttribute('data-voc');
+        const mask = pick.getAttribute('data-mask');
+        if (voc) this.onAction(`/vocation ${voc}`);
+        else if (mask) this.onAction(`/mask equip ${mask}`);
+        return;
+      }
       const target = hit?.closest?.('[data-node]') as HTMLElement | null;
       const id = target?.getAttribute('data-node');
       if (!id || !target) return;
@@ -398,21 +421,67 @@ export class TalentPanel {
     const p = this.store.state;
     this.head.textContent = `${p.talentPoints} pt · melee ${p.meleeDamage} · Lv${p.level}`;
     const branches = this.store.branchOrder.length > 0 ? this.store.branchOrder : [...new Set(tree.map((n) => n.branch))];
-    this.body.innerHTML = branches
-      .map((branch) => {
-        const nodes = this.store.branch(branch);
-        if (nodes.length === 0) return '';
-        const colour = BRANCH_COLOUR[branch] ?? '#cfe3ff';
-        const spent = nodes.reduce((n, node) => n + this.store.rank(node.id), 0);
-        return (
-          `<div class="af-branch">` +
-          `<div style="color:${colour}">${esc(branch.toUpperCase())} · ${spent} ranks</div>` +
-          nodes.map((n) => this.nodeHtml(n)).join('') +
-          '</div>'
-        );
-      })
-      .join('');
+    this.body.innerHTML =
+      this.pickerHtml() +
+      branches
+        .map((branch) => {
+          const nodes = this.store.branch(branch);
+          if (nodes.length === 0) return '';
+          const colour = BRANCH_COLOUR[branch] ?? '#cfe3ff';
+          const spent = nodes.reduce((n, node) => n + this.store.rank(node.id), 0);
+          return (
+            `<div class="af-branch">` +
+            `<div style="color:${colour}">${esc(branch.toUpperCase())} · ${spent} ranks</div>` +
+            nodes.map((n) => this.nodeHtml(n)).join('') +
+            '</div>'
+          );
+        })
+        .join('');
     return true;
+  }
+
+  /**
+   * Calling + mask pickers. Empty on older shards (no catalogs) so the tree
+   * renders exactly as before. Uses `af-pick`/`data-voc`/`data-mask` — never
+   * the `af-node`/`data-node` selectors the tree tests pin.
+   */
+  private pickerHtml(): string {
+    let html = '';
+    if (this.store.vocations.length > 0) {
+      const cur = this.store.state.vocation;
+      html +=
+        `<div class="af-pickhead">CALLING · ${esc(cur ?? 'unsworn')} — /vocation &lt;id&gt;</div>` +
+        this.store.vocations
+          .map((v) => {
+            const sel = v.id === cur ? ' sel' : '';
+            const click = this.onAction ? '' : ' noclick';
+            return (
+              `<div class="af-pick${sel}${click}" data-voc="${esc(v.id)}" title="${esc(v.description)}">` +
+              `<span>${esc(v.name)}<br/><span class="af-desc">${esc(v.role)} · favors ${esc(v.favoredBranch)} · ${esc(v.signature.name)}</span></span>` +
+              `<span class="af-rank">${v.id === cur ? 'YOU' : 'take up'}</span>` +
+              '</div>'
+            );
+          })
+          .join('');
+    }
+    if (this.store.masks.length > 0) {
+      const cur = this.store.state.maskId;
+      html +=
+        `<div class="af-pickhead">MASK · ${esc(cur ?? 'bare')} — /mask equip &lt;id&gt;</div>` +
+        this.store.masks
+          .map((m) => {
+            const sel = m.id === cur ? ' sel' : '';
+            const click = this.onAction ? '' : ' noclick';
+            return (
+              `<div class="af-pick${sel}${click}" data-mask="${esc(m.id)}" title="${esc(m.description)}">` +
+              `<span>${esc(m.glyph)} ${esc(m.name)}<br/><span class="af-desc">${esc(m.perk)} · ${m.price}g</span></span>` +
+              `<span class="af-rank">${m.id === cur ? 'WORN' : 'wear'}</span>` +
+              '</div>'
+            );
+          })
+          .join('');
+    }
+    return html;
   }
 
   private nodeHtml(node: TalentNode): string {

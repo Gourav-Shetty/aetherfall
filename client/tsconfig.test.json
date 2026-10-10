@@ -38,6 +38,8 @@
     "src/i18n.test.ts",
     "src/a11y.ts",
     "src/a11y.test.ts",
+    "src/masks.ts",
+    "src/masks.test.ts",
     "src/social.ts",
     "src/social.test.ts",
     "src/panels.ts",

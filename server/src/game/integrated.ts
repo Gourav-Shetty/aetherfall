@@ -38,6 +38,24 @@ import { BASE_DMG } from './combat.js';
 import { maskText } from './chat.js';
 import { ITEMS, WEAPONS, itemDef, type ItemDef, type ItemKind, type WeaponDef } from './content.js';
 import {
+  MASKS,
+  MASK_TALENT_POINTS,
+  THROW_RANGE_BASE,
+  extraLootRolls as maskExtraLootRolls,
+  finishReach as maskFinishReach,
+  hazardDamageTaken as maskHazardTaken,
+  isMaskId,
+  maskDef,
+  maskEquippedEvent,
+  maskEquippedItem,
+  maskMeleeMult,
+  maskMuffles,
+  maskUnequippedEvent,
+  throwRange as maskThrowRange,
+  wallPingDue,
+  wallPingIntervalMs,
+} from './masks.js';
+import {
   addItem,
   canFit,
   countOf,
@@ -58,25 +76,36 @@ import {
 } from '../systems/economy.js';
 
 import {
+  BASE_STATS,
   BRANCHES,
   MAX_LEVEL,
   PER_LEVEL_STATS,
   SKILL_TREE,
+  VOCATIONS,
   addXp as addProgressionXp,
   aggregateStats,
+  branchRanks,
   createProgression,
+  isVocationId,
   learnNode,
   nodesInBranch,
+  perLevelFor,
   powerScore,
   respec as respecTalents,
+  signatureReady,
+  signatureRetryMs,
   skillNode,
   statsForItem,
   talentPointsForLevel,
+  talentRankCost,
+  vocationDef,
   xpToNextLevel,
   type Branch,
   type EquippedItem,
   type ProgressionState,
+  type SignatureEffect,
   type StatBlock,
+  type VocationId,
 } from '../systems/progression.js';
 
 import {
@@ -228,6 +257,9 @@ export type ChatCommand =
   | { name: 'talent'; nodeId: string }
   | { name: 'respec' }
   | { name: 'stats' }
+  | { name: 'mask'; sub: 'list' | 'equip' | 'unequip'; arg?: string }
+  | { name: 'vocation'; arg?: string }
+  | { name: 'sig' }
   | { name: 'help' }
   | { name: 'unknown'; raw: string };
 
@@ -256,6 +288,13 @@ const ALIASES: Record<string, string> = {
   retrain: 'respec',
   stat: 'stats',
   stats: 'stats',
+  mask: 'mask',
+  masks: 'mask',
+  vocation: 'vocation',
+  voc: 'vocation',
+  calling: 'vocation',
+  sig: 'sig',
+  signature: 'sig',
   help: 'help',
   '?': 'help',
   commands: 'help',
@@ -276,6 +315,9 @@ export const COMMAND_REFERENCE: string[] = [
   '/talents — the 3x5 tree · /talent <nodeId> — spend 1 point',
   '/respec — wipe talents, refunds every point (gold)',
   '/stats — aggregated stat block',
+  '/mask — list the 8 masks · /mask equip <id> · /mask unequip (one slot)',
+  '/vocation — list the callings · /vocation <id> (starting kit + favored branch 20% off)',
+  '/sig — unleash your signature (12s cooldown; skill slot 1 also fires it)',
   '/help — this list',
 ];
 
@@ -353,6 +395,19 @@ export function parseChatCommand(raw: string): ChatCommand | null {
       return { name: 'respec' };
     case 'stats':
       return { name: 'stats' };
+    case 'mask': {
+      // Bare `/mask` lists; `/mask equip <id>` wears, `/mask unequip` doffs.
+      const sub = args.length === 0 ? 'list' : args[0]!.toLowerCase();
+      if (sub === 'list' && args.length === 0) return { name: 'mask', sub: 'list' };
+      if (sub === 'equip') return args[1] ? { name: 'mask', sub: 'equip', arg: args[1] } : { name: 'unknown', raw: text };
+      if (sub === 'unequip') return { name: 'mask', sub: 'unequip' };
+      return { name: 'unknown', raw: text };
+    }
+    case 'vocation':
+      // Bare `/vocation` lists the four callings; `/vocation <id>` takes one up.
+      return args.length === 0 ? { name: 'vocation' } : { name: 'vocation', arg: args[0]!.toLowerCase() };
+    case 'sig':
+      return { name: 'sig' };
     case 'help':
       return { name: 'help' };
     // Party subcommands also work as top-level verbs (`/leave`, `/kick Ash`).
@@ -469,6 +524,20 @@ export class GameSession {
   private readonly wallets = new Map<number, number>();
   private readonly inv = new Map<number, Inventory>();
   private readonly loadout = new Map<number, EquippedItem[]>();
+  /** The single worn mask per player (mask id; exactly one slot). */
+  private readonly masks = new Map<number, string>();
+  /** Unspent talent-boon points granted by the worn mask. */
+  private readonly maskBonus = new Map<number, number>();
+  /** Players who already consumed their boon grant (anti-farm latch). */
+  private readonly boonUsed = new Set<number>();
+  /** Chosen vocation per player (in-memory only, never persisted). */
+  private readonly vocations = new Map<number, VocationId>();
+  /** Players already handed a vocation starting kit (kits grant once). */
+  private readonly kitGranted = new Set<number>();
+  /** Last signature timestamp per player (12s cooldown). */
+  private readonly sigAt = new Map<number, number>();
+  /** Last wall-ping timestamp per player (1/s cadence). */
+  private readonly pingAt = new Map<number, number>();
   private readonly partyOf = new Map<number, Party>();
   private readonly invites = new Map<number, Invite>();
   private readonly inviteAt = new Map<number, number>();
@@ -546,6 +615,13 @@ export class GameSession {
     this.wallets.delete(playerId);
     this.inv.delete(playerId);
     this.loadout.delete(playerId);
+    this.masks.delete(playerId);
+    this.maskBonus.delete(playerId);
+    this.boonUsed.delete(playerId);
+    this.vocations.delete(playerId);
+    this.kitGranted.delete(playerId);
+    this.sigAt.delete(playerId);
+    this.pingAt.delete(playerId);
     this.statsCache.delete(playerId);
     this.inviteAt.delete(playerId);
     this.cmdAt.delete(playerId);
@@ -578,7 +654,42 @@ export class GameSession {
   }
 
   talentPoints(playerId: number): number {
-    return this.prog.get(playerId)?.talentPoints ?? 0;
+    return (this.prog.get(playerId)?.talentPoints ?? 0) + (this.maskBonus.get(playerId) ?? 0);
+  }
+
+  /** The worn mask id, or null when bare-faced. */
+  activeMask(playerId: number): string | null {
+    return this.masks.get(playerId) ?? null;
+  }
+
+  /** The chosen vocation id, or null when unsworn. */
+  vocation(playerId: number): VocationId | null {
+    return this.vocations.get(playerId) ?? null;
+  }
+
+  /** Extra loot rolls from the worn mask (tithe scale). */
+  extraLootRolls(playerId: number): number {
+    return maskExtraLootRolls(this.activeMask(playerId));
+  }
+
+  /** Extra finish reach from the worn mask (gallow-beak). */
+  finishBonus(playerId: number): number {
+    return maskFinishReach(0, this.activeMask(playerId));
+  }
+
+  /** Throw reach with the worn mask applied (choir horn: +4u). */
+  throwReach(playerId: number): number {
+    return maskThrowRange(THROW_RANGE_BASE, this.activeMask(playerId));
+  }
+
+  /** True while footsteps emit no noise events (dusk maw). */
+  muffles(playerId: number): boolean {
+    return maskMuffles(this.activeMask(playerId));
+  }
+
+  /** Hazard damage taken with the worn mask applied (cinder hide). */
+  hazardTaken(playerId: number, base: number): number {
+    return maskHazardTaken(base, this.activeMask(playerId));
   }
 
   party(playerId: number): Party | undefined {
@@ -608,21 +719,33 @@ export class GameSession {
 
   /**
    * Aggregated stat block for a player: `base + perLevel + talents + items`.
+   * The worn mask rides along as an `EquippedItem` and the vocation swaps the
+   * per-level curve — with neither, this is byte-identical to the legacy call.
    * Memoised; invalidated whenever level, talents or the loadout change.
    */
   stats(playerId: number): StatBlock {
     const cached = this.statsCache.get(playerId);
     if (cached) return cached;
     const st = this.prog.get(playerId);
-    const computed = aggregateStats(st ? st.level : 1, st ? st.talents : {}, this.loadout.get(playerId) ?? []);
+    const items = [...(this.loadout.get(playerId) ?? [])];
+    const mask = this.masks.get(playerId);
+    if (mask) items.push(maskEquippedItem(mask));
+    const computed = aggregateStats(
+      st ? st.level : 1,
+      st ? st.talents : {},
+      items,
+      BASE_STATS,
+      perLevelFor(this.vocations.get(playerId) ?? null),
+    );
     this.statsCache.set(playerId, computed);
     return computed;
   }
 
   /**
    * Melee damage = legacy `combat.damageFor(level)` curve + the attackPower that
-   * talents and equipped weapons contribute. Identical to the legacy number
-   * when nothing is spent; strictly greater once a build invests.
+   * talents and equipped weapons contribute, times the worn mask's multiplier
+   * (seraph shard: x1.15). Identical to the legacy number when nothing is
+   * spent and no mask is worn; strictly greater once a build invests.
    */
   meleeDamage(playerId: number): number {
     const st = this.prog.get(playerId);
@@ -630,12 +753,13 @@ export class GameSession {
     const stats = this.stats(playerId);
     const perLevelPart = PER_LEVEL_STATS.attackPower * Math.max(0, level - 1);
     const buildBonus = Math.max(0, stats.attackPower - perLevelPart);
-    return MELEE_BASE_DMG + (level - 1) * MELEE_PER_LEVEL_DMG + buildBonus;
+    const base = MELEE_BASE_DMG + (level - 1) * MELEE_PER_LEVEL_DMG + buildBonus;
+    return Math.round(base * maskMeleeMult(this.activeMask(playerId)));
   }
 
-  /** Vendor quotes for the whole catalogue, priced against live history. */
+  /** Vendor quotes for the whole catalogue (items + weapons + masks). */
   vendorStock(now: number): VendorRow[] {
-    const ids = [...ITEMS.map((i) => i.id), ...WEAPONS.map((w) => w.id)];
+    const ids = [...ITEMS.map((i) => i.id), ...WEAPONS.map((w) => w.id), ...MASKS.map((m) => m.id)];
     return ids.map((itemId) => {
       const base = defPrice(itemId);
       return {
@@ -669,6 +793,10 @@ export class GameSession {
       power: powerScore(stats),
       meleeDamage: this.meleeDamage(playerId),
       gold: this.gold(playerId),
+      // Masks + vocations ride the same snapshot (additive; older clients ignore).
+      maskId: this.activeMask(playerId),
+      maskBonus: this.maskBonus.get(playerId) ?? 0,
+      vocation: this.vocation(playerId),
     };
   }
 
@@ -684,6 +812,26 @@ export class GameSession {
         maxRank: n.maxRank,
         costPerRank: n.costPerRank,
         requires: n.requires.map((r) => ({ ...r })),
+      })),
+      // Choice catalogs for the mask + vocation pickers (additive).
+      vocations: VOCATIONS.map((v) => ({
+        id: v.id,
+        name: v.name,
+        role: v.role,
+        description: v.description,
+        favoredBranch: v.favoredBranch,
+        startingWeapon: v.startingWeapon,
+        startingMask: v.startingMask,
+        signature: { id: v.signature.id, name: v.signature.name, description: v.signature.description, cooldownMs: v.signature.cooldownMs },
+      })),
+      masks: MASKS.map((m) => ({
+        id: m.id,
+        name: m.name,
+        theme: m.theme,
+        perk: m.perk,
+        description: m.description,
+        price: m.price,
+        glyph: m.glyph,
       })),
     };
   }
@@ -1089,40 +1237,80 @@ export class GameSession {
 
   // ---------------------------------------------------------------- talents
 
-  /** Spend one talent point on `nodeId`. */
+  /**
+   * Spend talent points on one rank of `nodeId`. Vocation dollars go further
+   * here: the favored branch's every-5th rank is free (20% off), and an
+   * unspent talent-boon point (halo rind) is spent before pool points. With
+   * no vocation and no boon this delegates to `learnNode` untouched.
+   */
   spendTalent(playerId: number, nodeId: string): IntegratedOut[] {
     const st = this.prog.get(playerId);
     if (!st) return [];
-    const res = learnNode(st, nodeId);
-    if (!res.ok) {
-      const node = skillNode(nodeId);
-      const why =
-        res.reason === 'unknown-node'
-          ? `No such talent "${nodeId}".`
-          : res.reason === 'maxed'
-            ? node
-              ? `${node.name} is already maxed (rank ${st.talents[nodeId] ?? 0}/${node.maxRank}).`
-              : 'Already maxed.'
-            : res.reason === 'no-points'
-              ? 'No talent points left.'
-              : `Locked — needs ${res.detail ?? 'a prerequisite'}.`;
-      return [reply(playerId, why), privateEvent(playerId, 'talent-denied', { playerId, nodeId, reason: res.reason })];
+    const node = skillNode(nodeId);
+    if (!node) {
+      return [reply(playerId, `No such talent "${nodeId}".`), privateEvent(playerId, 'talent-denied', { playerId, nodeId, reason: 'unknown-node' })];
     }
-    this.prog.set(playerId, res.state);
+    const rank = st.talents[nodeId] ?? 0;
+    if (rank >= node.maxRank) {
+      return [
+        reply(playerId, `${node.name} is already maxed (rank ${st.talents[nodeId] ?? 0}/${node.maxRank}).`),
+        privateEvent(playerId, 'talent-denied', { playerId, nodeId, reason: 'maxed' }),
+      ];
+    }
+    for (const req of node.requires) {
+      if ((st.talents[req.nodeId] ?? 0) < req.rank) {
+        return [
+          reply(playerId, `Locked — needs ${req.nodeId} rank ${req.rank}.`),
+          privateEvent(playerId, 'talent-denied', { playerId, nodeId, reason: 'prereq' }),
+        ];
+      }
+    }
+    const voc = this.vocations.get(playerId) ?? null;
+    const cost = talentRankCost(node, voc, branchRanks(st.talents, node.branch) + 1);
+    const bonus = this.maskBonus.get(playerId) ?? 0;
+    if (st.talentPoints + bonus < cost) {
+      return [reply(playerId, 'No talent points left.'), privateEvent(playerId, 'talent-denied', { playerId, nodeId, reason: 'no-points' })];
+    }
+    let next: ProgressionState;
+    if (cost === node.costPerRank && bonus === 0) {
+      // Fast path: byte-identical to the legacy `learnNode` call.
+      const res = learnNode(st, nodeId);
+      if (!res.ok) {
+        return [reply(playerId, 'No talent points left.'), privateEvent(playerId, 'talent-denied', { playerId, nodeId, reason: res.reason })];
+      }
+      next = res.state;
+    } else {
+      // Discounted or boon-funded rank: same validation, custom charge, and
+      // the boon point is spent first. A spent boon latches `boonUsed` so
+      // re-wearing the rind cannot mint infinite points.
+      const fromBonus = Math.min(bonus, cost);
+      const fromPool = cost - fromBonus;
+      if (fromBonus > 0) {
+        this.maskBonus.set(playerId, bonus - fromBonus);
+        this.boonUsed.add(playerId);
+      }
+      next = {
+        ...st,
+        talents: { ...st.talents, [nodeId]: rank + 1 },
+        talentPoints: st.talentPoints - fromPool,
+        spentPoints: st.spentPoints + fromPool,
+      };
+    }
+    this.prog.set(playerId, next);
     this.statsCache.delete(playerId);
-    const node = skillNode(nodeId)!;
+    const remaining = next.talentPoints + (this.maskBonus.get(playerId) ?? 0);
     return [
       privateEvent(playerId, 'talent-learned', {
         playerId,
         nodeId,
-        rank: res.state.talents[nodeId] ?? 0,
+        rank: next.talents[nodeId] ?? 0,
         maxRank: node.maxRank,
         branch: node.branch,
-        remainingPoints: res.state.talentPoints,
+        remainingPoints: remaining,
         meleeDamage: this.meleeDamage(playerId),
       }),
       privateEvent(playerId, 'progression', this.progressionPayload(playerId)),
-      reply(playerId, `${node.name} ${res.state.talents[nodeId]}/${node.maxRank} — ${node.description}`),
+      reply(playerId, `${node.name} ${next.talents[nodeId]}/${node.maxRank} — ${node.description}`),
     ];
   }
 
@@ -1154,6 +1342,16 @@ export class GameSession {
   talentSummary(playerId: number): string[] {
     const st = this.prog.get(playerId) ?? createProgression(1);
     const lines = [`Lv${st.level} — ${st.talentPoints} talent point(s) unspent`];
+    const voc = this.vocations.get(playerId);
+    if (voc) {
+      const def = vocationDef(voc)!;
+      lines.push(`Calling: ${def.name} (${def.role}; ${def.favoredBranch} ranks 20% off)`);
+    }
+    const mask = this.masks.get(playerId);
+    if (mask) {
+      const def = maskDef(mask)!;
+      lines.push(`Mask: ${def.name} ${def.glyph} (${def.perk})`);
+    }
     for (const branch of BRANCHES) {
       const rows = nodesInBranch(branch);
       const spent = rows.reduce((n, node) => n + (st.talents[node.id] ?? 0), 0);
@@ -1277,7 +1475,10 @@ export class GameSession {
   equip(playerId: number, itemId: string): IntegratedOut[] {
     if (!this.prog.has(playerId)) return [];
     const weapon = weaponDefFor(itemId);
-    if (!weapon) return [reply(playerId, `${defLabel(itemId)} is not a weapon.`)];
+    if (!weapon) {
+      if (isMaskId(itemId)) return [reply(playerId, `${defLabel(itemId)} is a mask — wear it with /mask equip ${itemId}.`)];
+      return [reply(playerId, `${defLabel(itemId)} is not a weapon.`)];
+    }
     if (countOf(this.inventory(playerId), itemId) <= 0) {
       return [reply(playerId, `You do not carry a ${defLabel(itemId)}.`)];
     }
@@ -1293,6 +1494,9 @@ export class GameSession {
   }
 
   unequip(playerId: number, itemId: string): IntegratedOut[] {
+    if (isMaskId(itemId) && this.masks.get(playerId) === itemId) {
+      return this.unequipMask(playerId);
+    }
     const loadout = this.loadout.get(playerId) ?? [];
     const next = loadout.filter((e) => e.itemId !== itemId);
     if (next.length === loadout.length) return [reply(playerId, `${defLabel(itemId)} is not equipped.`)];
@@ -1303,6 +1507,174 @@ export class GameSession {
       privateEvent(playerId, 'progression', this.progressionPayload(playerId)),
       reply(playerId, `Unequipped ${defLabel(itemId)} — melee ${this.meleeDamage(playerId)}.`),
     ];
+  }
+
+  // ------------------------------------------------------- masks + vocations
+
+  /** Lines describing the 8 masks (`/mask`), with owned counts. */
+  maskList(playerId: number): string[] {
+    const lines = ['Masks — one slot; wear with /mask equip <id>:'];
+    for (const m of MASKS) {
+      const worn = this.masks.get(playerId) === m.id ? ' (worn)' : '';
+      const owned = countOf(this.inventory(playerId), m.id);
+      lines.push(`  ${m.glyph} ${m.name} (${m.id}) — ${m.perk}, ${m.price}g, owned x${owned}${worn}`);
+    }
+    return lines;
+  }
+
+  /** Lines describing the 4 callings (`/vocation`). */
+  vocationList(): string[] {
+    const lines = ['Callings — take one up with /vocation <id>:'];
+    for (const v of VOCATIONS) {
+      lines.push(`  ${v.name} (${v.id}) — ${v.role}; favors ${v.favoredBranch} (20% off); kit ${v.startingWeapon} + ${v.startingMask}; signature ${v.signature.name} (${v.signature.cooldownMs / 1000}s)`);
+    }
+    return lines;
+  }
+
+  /**
+   * Wear a mask (exactly one slot — replaces whatever is worn). The mask
+   * must be in the bag (loot: bosses 25%, elites 5%; or vendor-bought).
+   * Perks apply immediately through aggregation + events; see masks.ts.
+   */
+  equipMask(playerId: number, maskId: string): IntegratedOut[] {
+    if (!this.prog.has(playerId)) return [];
+    const def = maskDef(maskId);
+    if (!def) return [reply(playerId, `${defLabel(maskId)} is not a mask.`)];
+    if (countOf(this.inventory(playerId), maskId) <= 0) {
+      return [reply(playerId, `You do not carry a ${def.name}.`)];
+    }
+    const prev = this.masks.get(playerId) ?? null;
+    if (prev === maskId) return [reply(playerId, `${def.name} is already worn.`)];
+    this.masks.set(playerId, maskId);
+    // Talent boon: granted while worn, unless the grant was already spent
+    // (the anti-farm latch — re-wearing cannot mint infinite points).
+    this.maskBonus.set(playerId, def.perk === 'talent-boon' && !this.boonUsed.has(playerId) ? MASK_TALENT_POINTS : 0);
+    this.statsCache.delete(playerId);
+    const ev = maskEquippedEvent(playerId, maskId, prev);
+    return [
+      privateEvent(playerId, 'inventory', this.inventoryPayload(playerId)),
+      privateEvent(playerId, 'progression', this.progressionPayload(playerId)),
+      { type: 'event', kind: ev.kind, payload: ev.payload as unknown as Record<string, unknown>, recipients: [playerId] },
+      reply(playerId, `You don the ${def.name} ${def.glyph} — ${def.description}`),
+    ];
+  }
+
+  /** Doff the worn mask; every perk deactivates immediately. */
+  unequipMask(playerId: number): IntegratedOut[] {
+    const worn = this.masks.get(playerId);
+    if (!worn) return [reply(playerId, 'You wear no mask.')];
+    const def = maskDef(worn);
+    this.masks.delete(playerId);
+    this.maskBonus.set(playerId, 0);
+    this.statsCache.delete(playerId);
+    const ev = maskUnequippedEvent(playerId, worn);
+    return [
+      privateEvent(playerId, 'inventory', this.inventoryPayload(playerId)),
+      privateEvent(playerId, 'progression', this.progressionPayload(playerId)),
+      { type: 'event', kind: ev.kind, payload: ev.payload as unknown as Record<string, unknown>, recipients: [playerId] },
+      reply(playerId, `You doff the ${def?.name ?? worn} — its gift fades.`),
+    ];
+  }
+
+  /** Route `/mask equip|unequip|list`. */
+  maskCommand(playerId: number, sub: 'list' | 'equip' | 'unequip', arg?: string): IntegratedOut[] {
+    switch (sub) {
+      case 'equip':
+        return arg ? this.equipMask(playerId, arg) : [reply(playerId, 'Wear which mask? /mask equip <id> — /mask lists them.')];
+      case 'unequip':
+        return this.unequipMask(playerId);
+      default:
+        return this.maskList(playerId).map((l) => reply(playerId, l));
+    }
+  }
+
+  /**
+   * Take up a calling. Grants the starting weapon + mask once (in-memory;
+   * never persisted), swaps the per-level stat curve, and unlocks the
+   * signature. Re-swearing is allowed but grants no second kit.
+   */
+  chooseVocation(playerId: number, vocationId: string): IntegratedOut[] {
+    if (!this.prog.has(playerId)) return [];
+    const def = vocationDef(vocationId);
+    if (!def || !isVocationId(vocationId)) {
+      return [reply(playerId, `No such calling "${vocationId}". Choose: ${VOCATIONS.map((v) => v.id).join(', ')}.`)];
+    }
+    this.vocations.set(playerId, def.id);
+    this.statsCache.delete(playerId);
+    const out: IntegratedOut[] = [
+      privateEvent(playerId, 'vocation', {
+        playerId,
+        vocation: def.id,
+        name: def.name,
+        role: def.role,
+        favoredBranch: def.favoredBranch,
+        signature: { id: def.signature.id, name: def.signature.name, description: def.signature.description, cooldownMs: def.signature.cooldownMs },
+      }),
+      privateEvent(playerId, 'progression', this.progressionPayload(playerId)),
+    ];
+    if (!this.kitGranted.has(playerId)) {
+      this.kitGranted.add(playerId);
+      const inv = this.inventory(playerId);
+      const got: string[] = [];
+      if (addItem(inv, def.startingWeapon, 1)) got.push(defLabel(def.startingWeapon));
+      if (addItem(inv, def.startingMask, 1)) got.push(defLabel(def.startingMask));
+      out.push(privateEvent(playerId, 'inventory', this.inventoryPayload(playerId)));
+      out.push(reply(playerId, `You walk the ${def.name} path (${def.role}; ${def.favoredBranch} talents 20% cheaper). Starting kit: ${got.length > 0 ? got.join(' + ') : 'nothing fit'}. Signature: ${def.signature.name} — /sig or skill slot 1 (${def.signature.cooldownMs / 1000}s).`));
+    } else {
+      out.push(reply(playerId, `You walk the ${def.name} path now (${def.role}). No second kit — the first was gift enough.`));
+    }
+    return out;
+  }
+
+  /**
+   * Fire the vocation signature from the `input.skill` slot (or `/sig` for
+   * its status line). Enforces the 12s cooldown; returns the effect for the
+   * caller to apply (heals land on the sim player, strikes reuse the melee
+   * and NPC damage paths — see server/src/index.ts).
+   */
+  useSignature(playerId: number, slot: number, now: number): { out: IntegratedOut[]; ok: boolean; effect?: SignatureEffect } {
+    if (!this.players.has(playerId)) return { out: [], ok: false };
+    const voc = this.vocations.get(playerId);
+    if (!voc) return { out: [reply(playerId, 'Choose a calling first: /vocation <id>.')], ok: false };
+    const def = vocationDef(voc)!;
+    if (!Number.isInteger(slot) || slot !== 1) {
+      return { out: [reply(playerId, `Your signature is slot 1 — ${def.signature.name} (${def.signature.description})`)], ok: false };
+    }
+    const last = this.sigAt.get(playerId);
+    if (!signatureReady(last, now)) {
+      const ms = signatureRetryMs(last, now);
+      return {
+        out: [
+          reply(playerId, `${def.signature.name} is recharging — ready in ${(ms / 1000).toFixed(1)}s.`),
+          privateEvent(playerId, 'signature-denied', { playerId, signature: def.signature.id, retryMs: ms }),
+        ],
+        ok: false,
+      };
+    }
+    this.sigAt.set(playerId, now);
+    const effect = def.signature.effect;
+    return {
+      out: [
+        privateEvent(playerId, 'signature', { playerId, vocation: voc, signature: def.signature.id, name: def.signature.name, effect: { ...effect } }),
+        reply(playerId, `${def.signature.name}! ${def.signature.description}`),
+      ],
+      ok: true,
+      effect,
+    };
+  }
+
+  /** Status line for `/sig` (the firing itself rides the skill input). */
+  sigStatus(playerId: number, now: number): IntegratedOut[] {
+    if (!this.players.has(playerId)) return [];
+    const voc = this.vocations.get(playerId);
+    if (!voc) return [reply(playerId, 'Choose a calling first: /vocation <id>.')];
+    const def = vocationDef(voc)!;
+    const last = this.sigAt.get(playerId);
+    if (signatureReady(last, now)) {
+      return [reply(playerId, `${def.signature.name} is ready — slot 1. ${def.signature.description}`)];
+    }
+    const ms = signatureRetryMs(last, now);
+    return [reply(playerId, `${def.signature.name} is recharging — ready in ${(ms / 1000).toFixed(1)}s.`)];
   }
 
   // ------------------------------------------------------------------ chat
@@ -1387,6 +1759,12 @@ export class GameSession {
         return this.spendTalent(playerId, cmd.nodeId);
       case 'respec':
         return this.respec(playerId);
+      case 'mask':
+        return this.maskCommand(playerId, cmd.sub, cmd.arg);
+      case 'vocation':
+        return cmd.arg ? this.chooseVocation(playerId, cmd.arg) : this.vocationList().map((l) => reply(playerId, l));
+      case 'sig':
+        return this.sigStatus(playerId, now);
       case 'stats': {
         const stats = this.stats(playerId);
         return [
@@ -1433,6 +1811,16 @@ export class GameSession {
         }
         this.emotes = live;
       }
+    }
+
+    // 2b. wall pings (vesper plume): one private ping per second per wearer.
+    for (const [pid, maskId] of this.masks) {
+      const view = this.players.get(pid);
+      if (!view) continue;
+      if (wallPingIntervalMs(maskId) <= 0) continue;
+      if (!wallPingDue(this.pingAt.get(pid) ?? -Infinity, now, maskId)) continue;
+      this.pingAt.set(pid, now);
+      out.push(privateEvent(pid, 'wall-ping', { playerId: pid, maskId, x: view.x, y: view.y, at: now }));
     }
 
     // 3. party rows follow level + position + alive; snapshots are throttled.

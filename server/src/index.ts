@@ -865,7 +865,41 @@ wss.on('connection', (ws) => {
           // kill quests never advanced.
           // `emitGameEvent` routes mob-die to everyone and the personal reward
           // events (xp-gain / quest-* / levelup / pickup-spawn) to the killer.
-          for (const e of playerMeleeAttack(__game, pid, nowMs).events) emitGameEvent(e.kind, e.payload);
+          // MASKS: the tithe scale adds bonus loot rolls; the gallow-beak
+          // widens the execution window. Both default to legacy behaviour.
+          const meleeOpts: { bonusRolls?: number; finishBonus?: number } = __systems.enabled
+            ? { bonusRolls: __systems.extraLootRolls(pid), finishBonus: __systems.finishBonus(pid) }
+            : {};
+          const plainSwing = (meleeOpts.bonusRolls ?? 0) === 0 && (meleeOpts.finishBonus ?? 0) === 0;
+          for (const e of playerMeleeAttack(__game, pid, nowMs, plainSwing ? {} : meleeOpts).events) emitGameEvent(e.kind, e.payload);
+        }
+        if (__systems.enabled && m.input.skill !== undefined) {
+          // VOCATIONS: the sanitized `input.skill` slot fires the vocation
+          // signature (12s cooldown, enforced in the session). Heals land on
+          // the sim player; strikes reuse the melee + NPC damage paths, so no
+          // new damage pipeline is introduced.
+          const sig = __systems.useSignature(pid, m.input.skill, nowMs);
+          deliverSystems(sig.out);
+          if (sig.ok && sig.effect) {
+            if (sig.effect.kind === 'heal') {
+              p.hp = Math.min(p.maxHp, p.hp + sig.effect.amount);
+            } else if (sig.effect.kind === 'volley') {
+              npcs.damageFromPlayer(p.x, p.y, __systems.meleeDamage(pid) + sig.effect.bonusDmg, p.id);
+              for (const e of playerMeleeAttack(__game, pid, nowMs, {
+                range: sig.effect.range,
+                bonusDmg: sig.effect.bonusDmg,
+                bonusRolls: __systems.extraLootRolls(pid),
+                finishBonus: __systems.finishBonus(pid),
+              }).events) emitGameEvent(e.kind, e.payload);
+            } else {
+              npcs.damageFromPlayer(p.x, p.y, __systems.meleeDamage(pid) + sig.effect.bonusDmg, p.id);
+              for (const e of playerMeleeAttack(__game, pid, nowMs, {
+                bonusDmg: sig.effect.bonusDmg,
+                bonusRolls: __systems.extraLootRolls(pid),
+                finishBonus: __systems.finishBonus(pid),
+              }).events) emitGameEvent(e.kind, e.payload);
+            }
+          }
         }
         if (m.input.chat) {
           // SYSTEMS: chat commands (`/invite`, `/buy`, `/talent`, ...) skip

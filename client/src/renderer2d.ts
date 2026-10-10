@@ -2,6 +2,7 @@ import { ChunkCache, daylightFactor } from './tiles.js';
 import type { DrawEntity } from './types.js';
 import type { FogLike, RenderOpts } from './fog.js';
 import { hexToRgb } from './a11y.js';
+import { VOCATION_COLORS, maskGlyphFor } from './masks.js';
 import {
   TERR_LAVA,
   TERR_NONE,
@@ -70,6 +71,12 @@ export class CanvasRenderer {
    * Bodies are drawn fresh every frame, so a change applies immediately.
    */
   private bodyColors: Record<string, string> = { ...BODY };
+  /**
+   * Vocation base-disc colours, one set per palette mode (see masks.ts
+   * VOCATION_COLORS). Same validation + override path as the entity
+   * palette, so a palette switch re-tints class discs immediately.
+   */
+  private vocationColors: Record<string, string> = { ...VOCATION_COLORS.default };
   /** Telegraph ring colours as `r,g,b` triples for rgba() composition. */
   private teleFill = '255,40,40';
   private teleRing = '255,60,60';
@@ -106,6 +113,22 @@ export class CanvasRenderer {
   /** Current body colour for a snapshot kind (tests + palette sync). */
   entityColor(kind: string): string {
     return this.bodyColors[kind] ?? '#ccc';
+  }
+
+  /**
+   * Vocation override: class-coloured base discs. Only valid `#rrggbb`
+   * values replace a vocation; garbage is ignored per entry.
+   */
+  setVocationColors(map: Record<string, string>): void {
+    for (const [vocation, css] of Object.entries(map)) {
+      if (typeof css === 'string' && hexToRgb(css)) this.vocationColors[vocation] = css;
+    }
+  }
+
+  /** Current base-disc colour for a vocation ('' when unsworn/unknown). */
+  vocationColor(vocation: string | null | undefined): string {
+    if (!vocation) return '';
+    return this.vocationColors[vocation] ?? '';
   }
 
   /**
@@ -385,6 +408,12 @@ export class CanvasRenderer {
       const sx = toSx(e.x), sy = toSy(e.y) - lift;
       if (sx < -40 || sy < -40 || sx > W + 40 || sy > H + 40) continue;
       const color = e.isLocal ? '#59d98c' : this.entityColor(e.kind);
+      // Vocation base disc: class colour under the avatar (palette-driven).
+      const disc = e.kind !== 'pickup' && e.kind !== 'projectile' ? this.vocationColor(e.vocation) : '';
+      if (disc) {
+        ctx.fillStyle = disc;
+        ctx.beginPath(); ctx.ellipse(toSx(e.x), toSy(e.y) + 12, 14, 6, 0, 0, Math.PI * 2); ctx.fill();
+      }
       // shadow — always on the tile the body stands on, never lifted
       ctx.fillStyle = 'rgba(0,0,0,0.35)';
       ctx.beginPath(); ctx.ellipse(toSx(e.x), toSy(e.y) + 12, 11, 4.5, 0, 0, Math.PI * 2); ctx.fill();
@@ -421,10 +450,15 @@ export class CanvasRenderer {
         ctx.fillRect(sx - 15, sy - 24, 30, 5);
         ctx.fillStyle = frac > 0.5 ? '#51ff7a' : frac > 0.25 ? '#ffb84d' : '#ff5252';
         ctx.fillRect(sx - 15, sy - 24, 30 * frac, 5);
-        // name
+        // name (+ mask glyph above it when worn)
         ctx.fillStyle = e.isLocal ? '#d6ffe2' : '#fff';
         ctx.font = '11px system-ui';
         ctx.fillText(e.name, sx, sy - 28);
+        const glyph = maskGlyphFor(e.mask ?? null);
+        if (glyph) {
+          ctx.font = '13px system-ui';
+          ctx.fillText(glyph, sx, sy - 42);
+        }
       }
     }
 

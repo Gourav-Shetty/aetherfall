@@ -384,16 +384,18 @@ export function statsForItem(def: ItemDef | WeaponDef): Partial<StatBlock> {
  * Aggregate the FINAL stat block for a character:
  *   base + per-level * (level-1) + talents + items
  * then clamped + rounded. `items` may carry explicit `stats` (armor, rings)
- * and/or a content def-derived contribution.
+ * and/or a content def-derived contribution. `perLevel` defaults to
+ * `PER_LEVEL_STATS`; vocations pass their own curve (see `perLevelFor`).
  */
 export function aggregateStats(
   level: number,
   talents: Record<string, number>,
   items: EquippedItem[] = [],
   base: StatBlock = BASE_STATS,
+  perLevel: StatBlock = PER_LEVEL_STATS,
 ): StatBlock {
   const l = Math.max(1, Math.floor(level));
-  let total = addStats(base, scaleStats(PER_LEVEL_STATS, l - 1));
+  let total = addStats(base, scaleStats(perLevel, l - 1));
 
   // talents
   for (const [nodeId, rank] of Object.entries(talents)) {
@@ -422,4 +424,166 @@ export function aggregateStats(
 /** Quick power score for sorting/display; not used in combat math. */
 export function powerScore(stats: StatBlock): number {
   return Math.round(stats.attackPower * 3 + stats.spellPower * 3 + stats.maxHp * 0.5 + stats.maxMp * 0.2);
+}
+
+// ---------------------------------------------------------------------------
+// Vocations: 4 original callings of the Fall (pure data + pure helpers)
+// ---------------------------------------------------------------------------
+// Inspiration only: Tibia's knight/paladin/sorcerer/druid quartet (melee
+// tank / ranged skirmisher / fire caster / holy support). All names, curves
+// and signature effects below are original to AETHERFALL's fall-of-heaven
+// theme; nothing is reused from either game.
+//
+// Vocations are opt-in and in-memory only (chosen via `/vocation`, held on
+// the `GameSession`, never persisted). With no vocation chosen every helper
+// below degrades to the legacy path, so the existing curve is untouched.
+
+export type VocationId = 'dawnwarden' | 'galehunter' | 'pyrecantor' | 'vesperal';
+
+export type VocationRole = 'melee tank' | 'ranged skirmisher' | 'fire caster' | 'holy support';
+
+export type SignatureEffect =
+  | { kind: 'heal'; amount: number }
+  | { kind: 'volley'; range: number; bonusDmg: number }
+  | { kind: 'smite'; bonusDmg: number };
+
+export interface VocationDef {
+  id: VocationId;
+  name: string;
+  role: VocationRole;
+  description: string;
+  /** Per-level growth used INSTEAD of PER_LEVEL_STATS for this vocation. */
+  perLevel: StatBlock;
+  /** Starting weapon id (must resolve via `content.weaponDef`). */
+  startingWeapon: string;
+  /** Starting mask id (must resolve via `masks.maskDef`). */
+  startingMask: string;
+  /** Talent branch whose ranks are 20% cheaper (every 5th rank free). */
+  favoredBranch: Branch;
+  /** The one signature active, fired from the `input.skill` slot. */
+  signature: {
+    id: string;
+    name: string;
+    description: string;
+    cooldownMs: number;
+    effect: SignatureEffect;
+  };
+}
+
+/** Signature cooldown shared by all four vocations. */
+export const SIGNATURE_COOLDOWN_MS = 12_000;
+
+/** Rank-cost discount for the favored branch (every 5th rank free = 20% off). */
+export const VOCATION_DISCOUNT = 0.2;
+
+/** 4 original vocations of the Fall. */
+export const VOCATIONS: VocationDef[] = [
+  {
+    id: 'dawnwarden', name: 'Dawnwarden', role: 'melee tank',
+    description: 'A shield-bearer who stood the dawn watch when heaven fell. Holds the line; mends by oath-fire.',
+    perLevel: {
+      might: 3, guile: 1, will: 1, maxHp: 18, maxMp: 3, attackPower: 1, spellPower: 0,
+      critChance: 0, critMultiplier: 0, attackSpeed: 0, moveSpeed: 0,
+      blockChance: 0.004, blockReduction: 0.004, hpRegen: 0.15, mpRegen: 0.05,
+    },
+    startingWeapon: 'ward-blade', startingMask: 'cinder-hide', favoredBranch: 'might',
+    signature: {
+      id: 'oath-of-embers', name: 'Oath of Embers', description: 'Second wind: mend 25 HP on the spot.',
+      cooldownMs: SIGNATURE_COOLDOWN_MS, effect: { kind: 'heal', amount: 25 },
+    },
+  },
+  {
+    id: 'galehunter', name: 'Galehunter', role: 'ranged skirmisher',
+    description: 'A skyhook slinger who hunts the storm-gaps between falling shards. Never in reach, always in range.',
+    perLevel: {
+      might: 1, guile: 3, will: 1, maxHp: 10, maxMp: 5, attackPower: 2, spellPower: 0,
+      critChance: 0.002, critMultiplier: 0, attackSpeed: 0.01, moveSpeed: 0.02,
+      blockChance: 0, blockReduction: 0, hpRegen: 0.05, mpRegen: 0.05,
+    },
+    startingWeapon: 'wisp-touched-dagger', startingMask: 'gallow-beak', favoredBranch: 'guile',
+    signature: {
+      id: 'skyhook-volley', name: 'Skyhook Volley', description: 'Hurl a skyhook at triple reach (+6 damage).',
+      cooldownMs: SIGNATURE_COOLDOWN_MS, effect: { kind: 'volley', range: 6.5, bonusDmg: 6 },
+    },
+  },
+  {
+    id: 'pyrecantor', name: 'Pyrecantor', role: 'fire caster',
+    description: 'A choir-singer who kept the pyre notes after the choirs burned. Sings fire back into the world.',
+    perLevel: {
+      might: 1, guile: 1, will: 3, maxHp: 9, maxMp: 9, attackPower: 0, spellPower: 2,
+      critChance: 0, critMultiplier: 0, attackSpeed: 0, moveSpeed: 0,
+      blockChance: 0, blockReduction: 0, hpRegen: 0.05, mpRegen: 0.15,
+    },
+    startingWeapon: 'ward-blade', startingMask: 'vesper-plume', favoredBranch: 'will',
+    signature: {
+      id: 'pyre-canticle', name: 'Pyre Canticle', description: 'Sing a verse of burning (+10 damage strike).',
+      cooldownMs: SIGNATURE_COOLDOWN_MS, effect: { kind: 'smite', bonusDmg: 10 },
+    },
+  },
+  {
+    id: 'vesperal', name: 'Vesperal', role: 'holy support',
+    description: 'An evening-bell keeper tending the wounded of the Fall. Mends others by keeping the old hours.',
+    perLevel: {
+      might: 1, guile: 1, will: 3, maxHp: 11, maxMp: 8, attackPower: 0, spellPower: 1,
+      critChance: 0, critMultiplier: 0, attackSpeed: 0, moveSpeed: 0,
+      blockChance: 0.002, blockReduction: 0, hpRegen: 0.15, mpRegen: 0.15,
+    },
+    startingWeapon: 'wisp-touched-dagger', startingMask: 'halo-rind', favoredBranch: 'will',
+    signature: {
+      id: 'vesper-benediction', name: 'Vesper Benediction', description: 'Ring the evening bell: mend 40 HP.',
+      cooldownMs: SIGNATURE_COOLDOWN_MS, effect: { kind: 'heal', amount: 40 },
+    },
+  },
+];
+
+const VOCATION_BY_ID = new Map<string, VocationDef>(VOCATIONS.map((v) => [v.id, v]));
+
+export function vocationDef(id: string): VocationDef | undefined {
+  return VOCATION_BY_ID.get(id);
+}
+
+export function isVocationId(id: string): id is VocationId {
+  return VOCATION_BY_ID.has(id);
+}
+
+/** Per-level growth for a vocation (PER_LEVEL_STATS when unchosen/unknown). */
+export function perLevelFor(vocationId: string | null | undefined): StatBlock {
+  if (!vocationId) return PER_LEVEL_STATS;
+  return VOCATION_BY_ID.get(vocationId)?.perLevel ?? PER_LEVEL_STATS;
+}
+
+/** Total purchased ranks across one branch (for the favored-branch discount). */
+export function branchRanks(talents: Record<string, number>, branch: Branch): number {
+  let n = 0;
+  for (const node of SKILL_TREE) {
+    if (node.branch !== branch) continue;
+    n += Math.max(0, Math.floor(talents[node.id] ?? 0));
+  }
+  return n;
+}
+
+/**
+ * Points charged for one rank of `node`. Vocations pay full price except in
+ * their favored branch, where every 5th rank is free — 4 points per 5 ranks,
+ * i.e. exactly the 20% `VOCATION_DISCOUNT`. `branchRankAfter` is the branch
+ * rank total AFTER this purchase (so callers pass `branchRanks + 1`).
+ */
+export function talentRankCost(node: SkillNode, vocationId?: string | null, branchRankAfter?: number): number {
+  const voc = vocationId ? VOCATION_BY_ID.get(vocationId) : undefined;
+  if (voc && node.branch === voc.favoredBranch && branchRankAfter !== undefined) {
+    if (Math.floor(branchRankAfter) % 5 === 0) return 0;
+  }
+  return node.costPerRank;
+}
+
+/** True when the signature is off cooldown at `now`. Never used = ready. */
+export function signatureReady(lastUsedAt: number | undefined, now: number): boolean {
+  if (lastUsedAt === undefined || !Number.isFinite(lastUsedAt)) return true;
+  return now - lastUsedAt >= SIGNATURE_COOLDOWN_MS;
+}
+
+/** Ms until the signature is ready (0 when ready now). */
+export function signatureRetryMs(lastUsedAt: number | undefined, now: number): number {
+  if (signatureReady(lastUsedAt, now)) return 0;
+  return Math.max(0, SIGNATURE_COOLDOWN_MS - (now - (lastUsedAt as number)));
 }

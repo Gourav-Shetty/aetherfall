@@ -6,6 +6,8 @@
 // builds simply do not send these events, so an unknown kind or a missing field
 // must degrade to "no data" rather than throw during a render frame.
 
+import { AvatarOverlayStore } from './masks.js';
+
 /** Protocol v1 event kinds this module consumes. */
 export const EV = {
   PARTY: 'party',
@@ -24,6 +26,9 @@ export const EV = {
   XP_GAIN: 'xp-gain',
   LEVELUP: 'levelup',
   SYS_MSG: 'sys-msg',
+  MASK_EQUIPPED: 'mask-equipped',
+  MASK_UNEQUIPPED: 'mask-unequipped',
+  VOCATION: 'vocation',
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -43,6 +48,23 @@ export function str(v: unknown, fallback = ''): string {
 /** Read a plain record out of an untrusted payload. */
 export function rec(v: unknown): Record<string, unknown> | null {
   return v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+}
+
+/**
+ * Read a choice catalog (vocations / masks) out of an untrusted payload.
+ * Keeps only entries carrying every `need` key as a non-empty string; all
+ * other fields degrade to blanks/zeros. Anything malformed yields [].
+ */
+export function readChoices(v: unknown, need: string[]): Array<Record<string, unknown>> {
+  if (!Array.isArray(v)) return [];
+  const out: Array<Record<string, unknown>> = [];
+  for (const e of v) {
+    const r = rec(e);
+    if (!r) continue;
+    if (!need.every((k) => str(r[k]).length > 0)) continue;
+    out.push(r);
+  }
+  return out;
 }
 
 /** HTML-escape helper for the panel templates. */
@@ -309,6 +331,29 @@ export type TalentNode = {
   requires: { nodeId: string; rank: number }[];
 };
 
+/** One vocation choice from the server's talent-tree catalog. */
+export type VocationChoice = {
+  id: string;
+  name: string;
+  role: string;
+  description: string;
+  favoredBranch: string;
+  startingWeapon: string;
+  startingMask: string;
+  signature: { id: string; name: string; description: string; cooldownMs: number };
+};
+
+/** One mask choice from the server's talent-tree catalog. */
+export type MaskChoice = {
+  id: string;
+  name: string;
+  theme: string;
+  perk: string;
+  description: string;
+  price: number;
+  glyph: string;
+};
+
 export type ProgressionView = {
   level: number;
   xp: number;
@@ -321,6 +366,10 @@ export type ProgressionView = {
   meleeDamage: number;
   power: number;
   gold: number;
+  /** Worn mask id (null when bare-faced). Drives the mask picker. */
+  maskId: string | null;
+  /** Sworn vocation id (null when unsworn). Drives the calling picker. */
+  vocation: string | null;
 };
 
 /** Progression + skill-tree state, driven entirely by the server payloads. */
@@ -328,6 +377,10 @@ export class ProgressionStore {
   private nodes: TalentNode[] = [];
   private branches: string[] = [];
   private byId = new Map<string, TalentNode>();
+  /** Vocation choices from the talent-tree catalog (empty on older shards). */
+  vocations: VocationChoice[] = [];
+  /** Mask choices from the talent-tree catalog (empty on older shards). */
+  masks: MaskChoice[] = [];
   private prog: ProgressionView = {
     level: 1,
     xp: 0,
@@ -340,6 +393,8 @@ export class ProgressionStore {
     meleeDamage: 12,
     power: 0,
     gold: 0,
+    maskId: null,
+    vocation: null,
   };
   /** Nodes the server refused, with the reason, for a one-shot toast. */
   lastDenial: { nodeId: string; reason: string } | null = null;
@@ -379,6 +434,35 @@ export class ProgressionStore {
       this.branches = Array.isArray(p['branches'])
         ? (p['branches'] as unknown[]).filter((b): b is string => typeof b === 'string')
         : [...new Set(nodes.map((n) => n.branch))];
+      // Choice catalogs for the vocation + mask pickers (additive; older
+      // shards omit them and the pickers stay hidden).
+      this.vocations = readChoices(p['vocations'], ['id', 'name']).map((r) => {
+        const sig = rec(r['signature']) ?? {};
+        return {
+          id: str(r['id']),
+          name: str(r['name'], str(r['id'])),
+          role: str(r['role']),
+          description: str(r['description']),
+          favoredBranch: str(r['favoredBranch']),
+          startingWeapon: str(r['startingWeapon']),
+          startingMask: str(r['startingMask']),
+          signature: {
+            id: str(sig['id']),
+            name: str(sig['name'], str(sig['id'])),
+            description: str(sig['description']),
+            cooldownMs: Math.max(0, num(sig['cooldownMs'])),
+          },
+        };
+      });
+      this.masks = readChoices(p['masks'], ['id', 'name']).map((r) => ({
+        id: str(r['id']),
+        name: str(r['name'], str(r['id'])),
+        theme: str(r['theme']),
+        perk: str(r['perk']),
+        description: str(r['description']),
+        price: Math.max(0, Math.floor(num(r['price']))),
+        glyph: str(r['glyph']),
+      }));
       this.revision++;
       return true;
     }
@@ -406,6 +490,8 @@ export class ProgressionStore {
         meleeDamage: num(p['meleeDamage'], 12),
         power: num(p['power']),
         gold: Math.max(0, Math.floor(num(p['gold']))),
+        maskId: str(p['maskId']) || null,
+        vocation: str(p['vocation']) || null,
       };
       this.revision++;
       return true;
@@ -484,6 +570,8 @@ export class ProgressionStore {
     this.nodes = [];
     this.byId = new Map();
     this.branches = [];
+    this.vocations = [];
+    this.masks = [];
     this.lastDenial = null;
     this.revision++;
   }
@@ -644,15 +732,19 @@ export class SystemsView {
   readonly emotes = new EmoteStore();
   readonly progression = new ProgressionStore();
   readonly vendor = new VendorStore();
+  readonly overlay = new AvatarOverlayStore();
 
   /** True when at least one store consumed the event. */
   apply(kind: string, payload: unknown): boolean {
-    return (
+    const main =
       this.party.apply(kind, payload) ||
       this.emotes.apply(kind, payload) ||
       this.progression.apply(kind, payload) ||
-      this.vendor.apply(kind, payload)
-    );
+      this.vendor.apply(kind, payload);
+    // The overlay syncs from its own kinds plus the progression snapshot
+    // (maskId/vocation fields), so it runs even when a main store consumed
+    // the frame first.
+    return this.overlay.apply(kind, payload) || main;
   }
 
   reset(): void {
@@ -660,5 +752,6 @@ export class SystemsView {
     this.emotes.reset();
     this.progression.reset();
     this.vendor.reset();
+    this.overlay.reset();
   }
 }

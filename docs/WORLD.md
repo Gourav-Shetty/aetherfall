@@ -106,6 +106,35 @@ XP: level-up threshold is `level * 100` (`xpForNextLevel`, shared with
 | deep-halberd | Deep Halberd | +10 | 4 | dungeon |
 | caldera-greatsword | Caldera Greatsword | +12 | 5 | volcano |
 
+## Masks (8, one perk each — `server/src/game/masks.ts`)
+
+Wearable relics of the Fall. Exactly **one equip slot** (`/mask equip <id>` replaces
+whatever is worn); perks apply immediately through stat aggregation
+(`maskEquippedItem` → `aggregateStats`) and typed helpers at their consumption
+site, and every change emits `mask-equipped` / `mask-unequipped` events.
+Drops: bosses 25%, elites (level 6+) 5% — rolled in `loot.ts` beside the normal
+table (never inside `LOOT_TABLE`, which the catalog checker requires to resolve
+in shared). The vendor stocks all 8 (`vendor-stock` is 10 + 5 + 8 = 23 rows).
+
+| id | name | theme | perk (one) | price |
+| -- | ---- | ----- | ---------- | ----- |
+| seraph-shard | Seraph Shard | autor | +15% melee damage | 150g |
+| dusk-maw | Dusk Maw | beast | silent footsteps (no noise events) | 120g |
+| gallow-beak | Gallow Beak | bird | faster executions (finish reach +1u) | 130g |
+| choir-horn | Choir Horn | horn | longer throw range (+4u) | 130g |
+| vesper-plume | Vesper Plume | bird | see-through-walls ping every 1s | 160g |
+| tithe-scale | Tithe Scale | scale | one extra loot roll on kills | 170g |
+| cinder-hide | Cinder Hide | beast | −30% hazard damage taken | 140g |
+| halo-rind | Halo Rind | autor | +1 talent point while worn | 200g |
+
+Perk routing: melee mult in `GameSession.meleeDamage`; finish bonus in the
+melee `canFinishMob` reach; throw bonus in `ThrowOptions.range`; extra rolls in
+`rollLootForKill`/`applyKillRewards` (`bonusRolls`, threaded from the killer's
+mask through `playerMeleeAttack`/`onMobKilled`/`onBossKilled`); the boon point
+is spent before pool points with an anti-farm latch; the plume emits a private
+`wall-ping` at most 1/s from the session tick. Silence / hazard-ward resolve
+through pure gates (`maskMuffles`, `hazardDamageTaken`) at their consumers.
+
 ## Quest chain (5, Elder Maren)
 
 Linear prerequisites; progress via `chainOnKill` / `chainOnCollect` /

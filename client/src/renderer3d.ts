@@ -182,6 +182,13 @@ export class IsoRenderer {
    * baseColor every frame, so the change shows on the next update).
    */
   private bodyColors: Record<string, number> = { ...BODY_COLORS };
+  /**
+   * Vocation base-disc colours as 0xrrggbb (see client/src/masks.ts
+   * VOCATION_COLORS). Same override path as the entity palette: main.ts
+   * pushes one set per palette mode, so class discs follow a11y switches.
+   * Empty until the first applyPalette() — avatars fall back to teamColor.
+   */
+  private vocationColors: Record<string, number> = {};
   /** Telegraph ring + disc colours (override via setTelegraphColor). */
   private teleRing = 0xff3b3b;
   private teleDisc = 0xff2828;
@@ -1042,11 +1049,22 @@ export class IsoRenderer {
   }
 
   /**
+   * Vocation override: class-coloured base discs. Non-finite values are
+   * ignored per entry. Applied per-frame in update() (like fog dimming),
+   * so no live-body bookkeeping is needed here.
+   */
+  setVocationColors(map: Record<string, number>): void {
+    for (const [vocation, num] of Object.entries(map)) {
+      if (typeof num !== 'number' || !Number.isFinite(num)) continue;
+      this.vocationColors[vocation] = Math.floor(num) & 0xffffff;
+    }
+  }
+
+  /**
    * a11y: telegraph ring colour as 0xrrggbb. Rings created afterwards use it;
    * rings already winding up keep their old material.
    */
-  setTelegraphColor(ring: number, disc?: number): void {
-    if (typeof ring === 'number' && Number.isFinite(ring)) {
+  setTelegraphColor(ring: number, disc?: number): void {    if (typeof ring === 'number' && Number.isFinite(ring)) {
       this.teleRing = Math.floor(ring) & 0xffffff;
       this.teleDisc = typeof disc === 'number' && Number.isFinite(disc)
         ? Math.floor(disc) & 0xffffff
@@ -1321,7 +1339,9 @@ export class IsoRenderer {
         dim = tier === 0 ? 1 : tier === 1 ? 0.45 : 0.15;
       }
       b.refs.bodyMat.color.setHex(b.baseColor).multiplyScalar(dim);
-      b.refs.baseMat.color.setHex(b.teamColor).multiplyScalar(dim);
+      // Vocation base disc: class colour when sworn, else the team colour.
+      const vocColor = e.vocation ? this.vocationColors[e.vocation] : undefined;
+      b.refs.baseMat.color.setHex(vocColor ?? b.teamColor).multiplyScalar(dim);
       b.refs.headMat.color.setHex(0xf2c89b).multiplyScalar(dim);
       // Projectile tracers: additive glow + periodic ember trail.
       if (isProj) {

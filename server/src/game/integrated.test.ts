@@ -945,7 +945,7 @@ describe('integrated: vendor buy/sell respects gold and inventory', () => {
   it('lists every catalogue item with dynamic buy and sell prices', () => {
     const s = newSession();
     const stock = s.vendorStock(1000);
-    assert.equal(stock.length, 15, '10 items + 5 weapons');
+    assert.equal(stock.length, 23, '10 items + 5 weapons + 8 masks');
     const shard = stock.find((r) => r.itemId === 'ember-shard')!;
     assert.equal(shard.basePrice, 5);
     assert.equal(shard.buy, 6, 'base 5 * 1.15, ceil');
@@ -1075,7 +1075,7 @@ describe('integrated: vendor buy/sell respects gold and inventory', () => {
     s.addPlayer(1, 'Ash', 0, 0);
     const out = s.runCommand(1, { name: 'shop' }, 1000);
     assert.equal(ofKind(out, 'vendor-stock').length, 1);
-    assert.equal((ofKind(out, 'vendor-stock')[0]!['items'] as unknown[]).length, 15);
+    assert.equal((ofKind(out, 'vendor-stock')[0]!['items'] as unknown[]).length, 23);
     const lines = text(out);
     assert.match(lines[0]!, /you hold 1000g/);
     assert.match(lines.join('\n'), /Ember Shard \(ember-shard\) buy 6g \/ sell 3g/);

@@ -22,6 +22,7 @@ import { bossBars } from './bosses.js';
 // systems events (party / emotes / vendor / talents). Nothing existing is
 // replaced; see docs/SYSTEMS.md#Integration for the chat-command reference.
 import { SystemsView } from './social.js';
+import { VOCATION_COLORS, nametagFor } from './masks.js';
 import { EmoteBubbleLayer, PartyPanel, TalentPanel, VendorPanel } from './panels.js';
 import { TerrainView, zVisual } from './terrain_view.js';
 import { AssetLoader, DEFAULT_ART } from './assets.js';
@@ -99,6 +100,9 @@ const vendorPanel = new VendorPanel(document.getElementById('hud')!, systems.ven
 const talentPanel = new TalentPanel(document.getElementById('hud')!, systems.progression, (nodeId) => {
   sound.click();
   net.sendChat(`/talent ${nodeId}`, 'say');
+}, (command) => {
+  sound.click();
+  net.sendChat(command, 'say');
 });
 // Bubbles live in #labels (the world-space overlay), not #hud (screen space).
 const bubbleLayer = new EmoteBubbleLayer(labelsEl, systems.emotes);
@@ -473,10 +477,13 @@ a11y.onChange = () => { applyPalette(); hud.relocalize(); syncA11yPanel(); };
 /** Push the active colourblind-safe palette into whichever renderer is live. */
 function applyPalette(): void {
   const p = a11y.palette();
+  const mode = a11y.get().palette;
   c2d?.setEntityColors({
     player: p.player, npc: p.npc, mob: p.mob, pickup: p.pickup, projectile: p.projectile,
   });
   c2d?.setTelegraphColor(p.telegraph);
+  // Masks + vocations ride the same palette switch (class-coloured discs).
+  c2d?.setVocationColors({ ...VOCATION_COLORS[mode] });
   if (iso) {
     iso.setEntityColors({
       player: hexNum(p.player, 0xff9a4d),
@@ -486,6 +493,13 @@ function applyPalette(): void {
       projectile: hexNum(p.projectile, 0xffffff),
     });
     iso.setTelegraphColor(hexNum(p.telegraph, 0xff3b3b));
+    const vc = VOCATION_COLORS[mode];
+    iso.setVocationColors({
+      dawnwarden: hexNum(vc.dawnwarden, 0xffb84d),
+      galehunter: hexNum(vc.galehunter, 0x4dc3ff),
+      pyrecantor: hexNum(vc.pyrecantor, 0xff6b4d),
+      vesperal: hexNum(vc.vesperal, 0xc58bff),
+    });
   }
 }
 
@@ -680,6 +694,8 @@ hud.onSendChat = (text, channel) => {
   } else if (cmd.startsWith('/shop') || cmd.startsWith('/buy') || cmd.startsWith('/sell') || cmd === '/store' || cmd === '/vendor') {
     openPanel('af-vendor');
   } else if (cmd.startsWith('/talent') || cmd === '/tree' || cmd.startsWith('/respec') || cmd.startsWith('/stats')) {
+    openPanel('af-talents');
+  } else if (cmd.startsWith('/mask') || cmd.startsWith('/vocation') || cmd.startsWith('/voc ') || cmd === '/sig') {
     openPanel('af-talents');
   }
 };
@@ -1020,6 +1036,36 @@ net.onEvent = (kind, payload) => {
       }
       break;
     }
+    // --- masks + vocations (server game/masks.ts + progression.ts) ---
+    case 'mask-equipped': {
+      if (!forMe()) break;
+      const glyph = str('glyph') ?? '◇';
+      const perk = str('perk') ?? 'a gift';
+      const maskId = str('maskId') ?? 'mask';
+      hud.addKill(`${glyph} donned ${maskId} (${perk})`);
+      sound.quest();
+      break;
+    }
+    case 'mask-unequipped': {
+      if (!forMe()) break;
+      hud.addKill(`doffed ${str('maskId') ?? 'mask'} — its gift fades`);
+      break;
+    }
+    case 'vocation': {
+      if (!forMe()) break;
+      toast(`You walk the ${str('vocation') ?? '?' } path`, 3000);
+      sound.quest();
+      break;
+    }
+    case 'signature': {
+      if (!forMe()) break;
+      toast(`✦ ${str('name') ?? 'Signature'}`, 1500);
+      sound.attack();
+      break;
+    }
+    case 'wall-ping':
+    case 'signature-denied':
+      break; // silent by design: 1/s pings and cooldown notes never toast
     // --- respawn / despawn ---
     case 'respawn': {
       const id = num('id');
@@ -1190,7 +1236,9 @@ function updateLabels(list: DrawEntity[]) {
     const p = iso.project(e.x, e.y, zVisual(terrain.tileHeightAt(e.x, e.y)));
     d.style.left = p.sx + 'px';
     d.style.top = (p.sy - 8) + 'px';
-    if (d.textContent !== e.name) d.textContent = e.name;
+    // Mask icon above the head (3D channel; the 2D canvas draws the glyph).
+    const label = nametagFor(e.name, systems.overlay.forPlayer(e.id)?.mask ?? e.mask ?? null);
+    if (d.textContent !== label) d.textContent = label;
   }
   for (const [id, d] of [...labelPool]) {
     if (!seen.has(id)) { d.remove(); labelPool.delete(id); }
@@ -1200,8 +1248,10 @@ function updateLabels(list: DrawEntity[]) {
 function currentDrawList(now: number): DrawEntity[] {
   const list: DrawEntity[] = [];
   for (const e of net.entities.values()) {
+    // Mask + vocation overlays ride the event feed, not the snapshot wire.
+    const ov = systems.overlay.forPlayer(e.id);
     if (e.id === net.id) {
-      list.push({ id: e.id, kind: e.kind, x: pred.pos.x, y: pred.pos.y, hp: e.hp, maxHp: e.maxHp, name: e.name ?? ('#' + e.id), isLocal: true, z: e.z });
+      list.push({ id: e.id, kind: e.kind, x: pred.pos.x, y: pred.pos.y, hp: e.hp, maxHp: e.maxHp, name: e.name ?? ('#' + e.id), isLocal: true, z: e.z, mask: ov?.mask ?? null, vocation: ov?.vocation ?? null });
     } else {
       const s = interp.sample(e.id, now);
       list.push({
@@ -1210,6 +1260,8 @@ function currentDrawList(now: number): DrawEntity[] {
         // TERRAIN: the shard's authoritative elevation when `snapshotZ` is on;
         // the renderers sample the same pure field when it is absent.
         z: e.z,
+        mask: ov?.mask ?? null,
+        vocation: ov?.vocation ?? null,
       });
     }
   }

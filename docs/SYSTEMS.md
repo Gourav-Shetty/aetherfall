@@ -216,8 +216,25 @@ need the previous tier at **rank 2**):
 Stat aggregation: `base + perLevel * (level - 1) + talents + items`, then clamp
 `[0, 999]` and round (4 decimals on fractional stats). Weapons map
 `WeaponDef.damage -> attackPower` via `statsForItem()`; other item kinds
-contribute nothing passively. Clamped so crit/block chance and block reduction
-can never leave `[0, 1]` for any legal build.
+contribute nothing passively. Masks ride the same call as `EquippedItem`s and
+vocations swap the `perLevel` curve (see below). Clamped so crit/block chance
+and block reduction can never leave `[0, 1]` for any legal build.
+
+### Vocations (4 original callings)
+
+Opt-in and in-memory only (`/vocation <id>`; a reconnect starts unsworn).
+Each calling sets a per-level growth curve (used *instead of*
+`PER_LEVEL_STATS`, every curve non-negative so aggregation stays monotonic),
+a starting weapon + mask (granted once), one signature active on a shared
+12 s cooldown (`SIGNATURE_COOLDOWN_MS`, fired from the `input.skill` slot),
+and a favored talent branch whose every-5th rank is free (20% off).
+
+| id | name | role | curve/level (highlights) | kit | favors | signature (12s) |
+| -- | ---- | ---- | ------------------------ | --- | ------ | --------------- |
+| dawnwarden | Dawnwarden | melee tank | +18 maxHp, +3 might, +0.004 block | ward-blade + cinder-hide | might | Oath of Embers — heal 25 |
+| galehunter | Galehunter | ranged skirmisher | +2 attackPower, +3 guile, +0.02 moveSpeed | wisp-touched-dagger + gallow-beak | guile | Skyhook Volley — 6.5u strike +6 |
+| pyrecantor | Pyrecantor | fire caster | +2 spellPower, +3 will, +9 maxMp | ward-blade + vesper-plume | will | Pyre Canticle — strike +10 |
+| vesperal | Vesperal | holy support | +1 spellPower, +3 will, +0.15 regen | wisp-touched-dagger + halo-rind | will | Vesper Benediction — heal 40 |
 
 ## Integration
 
@@ -268,6 +285,8 @@ in doubt.
 | Proximity chat | `nearbyChat` (10 m) | `{t:'chat'}` to just the listeners |
 | Emotes | `playEmote` (per-emote radius) | `emote` to just the listeners, `emote-end` on expiry |
 | Vendor | `vendorBuy` / `vendorSell` / `vendorBuyPrice` / `vendorSellPrice` | `vendor-trade`, `gold`, `inventory`, `vendor-stock` |
+| Masks | `maskEquippedItem` + perk helpers (`game/masks.ts`) | `mask-equipped` / `mask-unequipped`, perk-aware `meleeDamage`, `wall-ping` 1/s |
+| Vocations | `VOCATIONS`, `talentRankCost`, `signatureReady` | `vocation`, discounted `talent-learned`, `signature` / `signature-denied` |
 
 **One XP authority.** With the flag on, `absorbLegacyXp` in `server/src/index.ts`
 intercepts the legacy `xp-gain` / `levelup` events and re-grants them through
@@ -294,16 +313,20 @@ kinds it does not know, so this is safe to ship server-first.
 
 | `kind` | Recipients | Payload |
 | --- | --- | --- |
-| `progression` | private | level, xp, xpNeeded, talentPoints, talents, stats, meleeDamage, power, gold |
-| `talent-tree` | private | the 15 nodes + branch order (sent once on join) |
+| `progression` | private | level, xp, xpNeeded, talentPoints, talents, stats, meleeDamage, power, gold, maskId, maskBonus, vocation |
+| `talent-tree` | private | the 15 nodes + branch order + vocation/mask choice catalogs (sent once on join) |
 | `talent-learned` / `talent-denied` | private | nodeId, rank, remainingPoints / reason |
 | `respec` | private | cost, refundedPoints, clearedNodes |
 | `party` | private, per member | roster with hp / maxHp / level / dead / ready / leader |
 | `party-invite` | private | fromId, fromName, partyId, expiresAt |
 | `emote` | listeners in radius | seq, fromId, emote, label, x, y, radius, expiresAt |
 | `emote-end` | private | seq, fromId, emote |
-| `vendor-stock` | private | 15 rows with dynamic buy / sell / demand index |
+| `vendor-stock` | private | 23 rows (10 + 5 + 8 masks) with dynamic buy / sell / demand index |
 | `vendor-trade` | private | side, itemId, qty, unitPrice, total, gold, ok, reason |
+| `mask-equipped` / `mask-unequipped` | private | maskId, perk, glyph (+ replaced) |
+| `vocation` | private | vocation, name, role, favoredBranch, signature |
+| `signature` / `signature-denied` | private | signature, name, effect / retryMs |
+| `wall-ping` | private | maskId, x, y, at (at most 1/s while the plume is worn) |
 | `gold` / `inventory` | private | wallet / 20 slots + equipped list |
 | `sys-msg` | private | one line of command feedback |
 
@@ -334,6 +357,9 @@ log. `/help` returns exactly this list.
 | `/talent <nodeId>` | spend points on one rank (alias `/spend`) |
 | `/respec` | wipe every talent, refund all points, charged `100 * level^2` |
 | `/stats` | the aggregated stat block |
+| `/mask` | list the 8 masks · `/mask equip <id>` · `/mask unequip` (one slot) |
+| `/vocation` | list the callings · `/vocation <id>` (starting kit + favored branch 20% off) |
+| `/sig` | signature status (fire it from skill slot 1; 12s cooldown) |
 | `/help` | this list (aliases `/?`, `/commands`) |
 
 Plain text on the `say` channel is 10 m proximity chat. `global` and `guild` are
@@ -350,8 +376,9 @@ moves, so a 10 Hz snapshot stream costs zero DOM work here.
 | --- | --- |
 | Party HUD | one row per member: name, leader star, readiness, live HP bar, dead strikethrough; loot rule and `n/m` in the footer; the pending-invite banner names `/accept` |
 | Emote bubbles | a glyph above the player in `#labels`, positioned through the active renderer's projection, expiring on the server's `expiresAt` |
-| Vendor panel | name, bag count, live buy price with a supply/demand arrow, sell price, wallet total; rejected rows are dimmed with the reason on hover |
-| Talent tree | 3 branch columns, 5 tiers each, rank `n/max`, prerequisite or points shortfall spelled out; click spends via `/talent`, locked and maxed nodes are not clickable |
+| Vendor panel | name, bag count, live buy price with a supply/demand arrow, sell price, wallet total; mask rows wear their glyph; rejected rows are dimmed with the reason on hover |
+| Talent tree | 3 branch columns, 5 tiers each, rank `n/max`, prerequisite or points shortfall spelled out; click spends via `/talent`, locked and maxed nodes are not clickable; calling + mask pickers on top (click sends `/vocation` / `/mask equip`) |
+| Avatar overlay | worn-mask glyph above the avatar (glyph nametag in 3D, canvas glyph in 2D) + class-coloured base disc from the active a11y palette; tracked per player from `mask-equipped` / `vocation` / `progression` events |
 
 ### Integration sketch (server tick)
 
@@ -382,6 +409,8 @@ safe. `GameSession` is the only mutable state holder.
 | `economy.test.ts` | history window/TTL/sort, index vs pressure, 50-250% clamps, spread never inverts, buy/sell rejections, spread sink, repair caps + reasons, auction escrow/24h expiry/bid escalation/buyout cut/cancel/expire, no double-release |
 | `social.test.ts` | party cap + leader gating, level-gap join, leave/promote/kick/disband, loot rules + master readiness, XP split exactness/radius/dead/gap, 10m chat + rate limit, 8 emotes + expiry |
 | `progression.test.ts` | curve monotonicity, multi-level XP, MAX_LEVEL, talent point grant, tree structure validation, prereqs, rank caps, apex cost, respec cost/refund, stat aggregation + clamps |
+| `vocations.test.ts` | 4 callings, monotonic curves, 20%-off discount end to end, 12s signature cooldown, starting-kit validity |
+| `game/masks.test.ts` | 8 defs (one perk each), all perks on/off over equip/unequip, one-slot replacement, 25%/5% drop odds, vendor buy/sell |
 
 Plus the integration suites — `server/src/game/integrated.test.ts` (82
 assertions, 10 suites), `client/src/social.test.ts` (51) and
@@ -391,7 +420,8 @@ assertions, 10 suites), `client/src/social.test.ts` (51) and
 
 - Persistence adapters (`toJSON`/`fromJSON`) for `PriceHistory`,
   `AuctionState` and `ProgressionState` — the shapes are already plain data.
-  `GameSession` keeps its state in memory only, so a reconnect starts fresh.
+  `GameSession` keeps its state in memory only, so a reconnect starts fresh
+  (masks, vocations, kits and signature timers included).
 - The auction house and `combat_ext`'s burn/HoT/stagger are reachable through
   `GameSession` APIs (`recordMarketTrade`, per-mob resistances) but have no chat
   command or client panel yet. `planLoot` drives the rule `/party loot` sets, but
