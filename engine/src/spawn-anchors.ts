@@ -108,11 +108,42 @@ export const SPAWN_ANCHOR_MIN_SEPARATION = 2 * SPAWN_SAFE_RADIUS;
  * spreads its population across every ring instead of stacking everyone on
  * one tile. Deterministic (no RNG) and stable for a given id, which keeps
  * `Sim.addPlayer(pid)` and `ensurePlayer(game, pid, ...)` in agreement.
+ *
+ * The rotation is 1-based (`(id - 1) % n`) so the FIRST player on a shard —
+ * id 1, the one you are almost always testing as — lands on `SPAWN_ANCHORS[0]`,
+ * the canonical world spawn. With a 0-based rotation id 1 would land on the
+ * shrine, which is the death-respawn point, and quietly make the world spawn
+ * unreachable by a fresh account.
  */
 export function spawnAnchorFor(playerId: number): SpawnAnchor {
   const n = SPAWN_ANCHORS.length;
-  const i = Math.abs(Math.trunc(playerId)) % n;
+  const i = (((Math.abs(Math.trunc(playerId)) - 1) % n) + n) % n;
   return SPAWN_ANCHORS[i]!;
+}
+
+/**
+ * The anchor whose `axis` coordinate is closest to `value`.
+ *
+ * A partially-specified spawn (`addPlayer(id, name, x)` with no y) has to fill
+ * the missing axis somehow. Filling it from `spawnAnchorFor(id)` picks an
+ * anchor chosen by player id, which is unrelated to the coordinate the caller
+ * actually asked for — `addPlayer(4, 'half', 12.5)` would land at (12.5, 14),
+ * far outside every safe disc, because anchor 4's y happens to be 14 while the
+ * nearest anchor to x=12.5 is west-meadow at (12,38). Snapping to the anchor
+ * nearest on the GIVEN axis keeps the result inside a safe disc, which is the
+ * only reason a half-specified spawn is allowed to exist at all.
+ */
+export function anchorNearestOn(axis: 'x' | 'y', value: number): SpawnAnchor {
+  let best = SPAWN_ANCHORS[0]!;
+  let bestD = Infinity;
+  for (const a of SPAWN_ANCHORS) {
+    const d = Math.abs(a[axis] - value);
+    if (d < bestD) {
+      best = a;
+      bestD = d;
+    }
+  }
+  return best;
 }
 
 /** True when (x,y) lies inside the no-mob disc of any anchor. */

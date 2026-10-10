@@ -25,6 +25,7 @@ import {
   SPAWN_ANCHORS,
   SPAWN_ANCHOR_MIN_SEPARATION,
   SPAWN_SAFE_RADIUS,
+  anchorNearestOn,
   isSpawnAnchorSafeZone,
   spawnAnchorFor,
 } from '@aetherfall/engine';
@@ -90,10 +91,12 @@ describe('spawn anchors: the table both the join path and the safe discs read', 
     const used = new Set<number>();
     for (let id = 1; id <= SPAWN_ANCHORS.length; id++) used.add(SPAWN_ANCHORS.indexOf(spawnAnchorFor(id)));
     assert.equal(used.size, SPAWN_ANCHORS.length, 'a full lap must visit every anchor');
-    assert.equal(spawnAnchorFor(1), SPAWN_ANCHORS[1 % SPAWN_ANCHORS.length], 'player 1 -> shrine');
+    // 1-based rotation: the first player on a shard gets the canonical world
+    // spawn, not the shrine (which is the death-respawn point).
+    assert.equal(spawnAnchorFor(1), SPAWN_ANCHORS[0], 'player 1 -> world spawn');
     assert.deepEqual(
       [7, 8, 9].map((id) => spawnAnchorFor(id).name),
-      [SPAWN_ANCHORS[1].name, SPAWN_ANCHORS[2].name, SPAWN_ANCHORS[3].name],
+      [SPAWN_ANCHORS[0].name, SPAWN_ANCHORS[1].name, SPAWN_ANCHORS[2].name],
       'the lap wraps',
     );
   });
@@ -104,11 +107,26 @@ describe('spawn anchors: the table both the join path and the safe discs read', 
     assert.equal(p.x, 77.5);
     assert.equal(p.y, 33.25);
     assert.deepEqual(sim.getPos(3), { x: 77.5, y: 33.25 });
-    // Per-axis: an explicit x with no y still anchors y.
+    // A partial spawn snaps to the whole anchor nearest on the supplied axis.
+    // Borrowing only the missing axis from some anchor is not safe — the
+    // anchor nearest on x can still be far from the requested x, putting the
+    // player outside every disc.
     const q = sim.addPlayer(4, 'half', 12.5);
-    assert.equal(q.x, 12.5);
-    assert.equal(q.y, spawnAnchorFor(4).y);
-    assert.ok(isSpawnSafeZone(12.5, q.y), 'the half-specified spawn is still on the table');
+    assert.equal(q.x, anchorNearestOn('x', 12.5).x);
+    assert.equal(q.y, anchorNearestOn('x', 12.5).y);
+    assert.ok(isSpawnSafeZone(q.x, q.y), 'the half-specified spawn is still on the table');
+  });
+
+  it('a half-specified spawn is spawn-safe on either axis', () => {
+    const sim = new Sim();
+    // Sweep the whole world on both axes: no partial spawn may ever produce an
+    // unprotected position, whatever coordinate the caller supplies.
+    for (let v = 0; v <= 100; v += 2) {
+      const onlyX = sim.addPlayer(1000 + v, 'x', v);
+      assert.ok(isSpawnSafeZone(onlyX.x, onlyX.y), `addPlayer(x=${v}) -> (${onlyX.x},${onlyX.y}) is unprotected`);
+      const onlyY = sim.addPlayer(2000 + v, 'y', undefined, v);
+      assert.ok(isSpawnSafeZone(onlyY.x, onlyY.y), `addPlayer(y=${v}) -> (${onlyY.x},${onlyY.y}) is unprotected`);
+    }
   });
 
   it('ensurePlayer with no coordinates resolves the same anchor the sim picked', () => {

@@ -6,7 +6,7 @@ import { getBiome, getZone, tileFlagsFor, type TileFlags, type TileHazard } from
 // ON a declared spawn anchor (round-robin by player id), which is exactly the
 // coordinate list the spawner keeps mob-free — the join path can no longer
 // disagree with the safe discs. See engine/src/spawn-anchors.ts.
-import { SHRINE_SPAWN, spawnAnchorFor } from '@aetherfall/engine';
+import { SHRINE_SPAWN, anchorNearestOn, spawnAnchorFor } from '@aetherfall/engine';
 import { TERRAIN_SEED } from './terrain_sys.js';
 import type { EntitySnapshot } from '@aetherfall/shared';
 // WALLS: shared wall schema + slide collision (additive).
@@ -141,9 +141,36 @@ export class Sim {
    * still passed.
    */
   addPlayer(id: number, name: string, x?: number, y?: number, nowMs: number = Date.now()): SimPlayer {
-    const anchor = spawnAnchorFor(id);
-    const px = x ?? anchor.x;
-    const py = y ?? anchor.y;
+    // A partial coordinate (only x, or only y) resolves to the anchor NEAREST
+    // on the supplied axis — the whole anchor position, not a mix of the
+    // caller's axis and a borrowed one.
+    //
+    // Filling only the missing axis from some anchor is not safe: the anchor
+    // nearest on x can still be far from the requested x, so (26, 38) is
+    // 14u from west-meadow and lands outside its 12u disc. Snapping the whole
+    // position makes every partial spawn land on a real anchor by
+    // construction, which is the guarantee the join path needs.
+    //
+    // A caller that supplies BOTH axes still gets exactly what it asked for
+    // (restore, scripted teleport, tests).
+    let px: number;
+    let py: number;
+    if (x === undefined && y === undefined) {
+      const anchor = spawnAnchorFor(id);
+      px = anchor.x;
+      py = anchor.y;
+    } else if (x !== undefined && y === undefined) {
+      const anchor = anchorNearestOn('x', x);
+      px = anchor.x;
+      py = anchor.y;
+    } else if (y !== undefined && x === undefined) {
+      const anchor = anchorNearestOn('y', y);
+      px = anchor.x;
+      py = anchor.y;
+    } else {
+      px = x!;
+      py = y!;
+    }
     const spawn = this.findFreeSpawn(px, py);
     // PLAYABILITY: spawn at full HP with 3s of protection (see protectedUntil).
     const p: SimPlayer = { id, name, x: spawn.x, y: spawn.y, vx: 0, vy: 0, hp: 100, maxHp: 100, seq: 0, z: 0, protectedUntil: nowMs + SPAWN_PROTECTION_MS };
