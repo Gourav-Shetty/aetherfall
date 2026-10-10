@@ -48,8 +48,9 @@ export function isSpawnSafeZone(
  * Spatial-index cell size in world units. Player melee reaches MELEE_RANGE
  * (2.2) and aggro pulls at AGGRO_RANGE (12); 8 keeps the candidate fan-out at
  * <=9 cells for a melee query while holding ~2 mobs per cell at MOBS_PER_CHUNK
- * per 32x32 chunk. Spawner mobs never walk, so the index is written once at
- * spawn and only patched on remove/move — no per-tick rebuild.
+ * per 32x32 chunk. The index is written once at spawn and patched on remove or
+ * move (`moveMob`, now driven every tick by the AI in `game/spawner-ai.ts`) —
+ * still no per-tick rebuild.
  */
 export const MOB_CELL_SIZE = 8;
 
@@ -137,6 +138,15 @@ export class Spawner {
 
   mobsList(): Mob[] {
     return [...this.mobs.values()];
+  }
+
+  /**
+   * Allocation-free iteration in spawn order. The AI driver
+   * (`game/spawner-ai.ts`) runs at 10Hz over every live mob, and
+   * `mobsList()` would allocate a fresh array on each of those ticks.
+   */
+  forEachMob(fn: (m: Mob) => void): void {
+    for (const m of this.mobs.values()) fn(m);
   }
 
   getMob(id: number): Mob | undefined {
@@ -256,6 +266,41 @@ export class Spawner {
       }
     }
     return best;
+  }
+
+  /**
+   * Every indexed mob whose position is within `range` of (x,y), dead ones
+   * included (callers that care filter on `alive`). Same grid-bucketed fan-out
+   * as nearestMobWithin, but it walks from the query point instead of the whole
+   * map: the AI driver uses it every tick to find the handful of mobs a player
+   * could actually be fighting.
+   */
+  forEachMobNear(x: number, y: number, range: number, fn: (m: Mob) => void): void {
+    if (!(range >= 0)) return;
+    const r2 = range * range;
+    const c0 = Math.floor((x - range) / MOB_CELL_SIZE);
+    const c1 = Math.floor((x + range) / MOB_CELL_SIZE);
+    const r0 = Math.floor((y - range) / MOB_CELL_SIZE);
+    const r1 = Math.floor((y + range) / MOB_CELL_SIZE);
+    for (let cy = r0; cy <= r1; cy++) {
+      for (let cx = c0; cx <= c1; cx++) {
+        const bucket = this.cells.get(`${cx},${cy}`);
+        if (!bucket) continue;
+        for (const m of bucket) {
+          const dx = m.pos.x - x;
+          const dy = m.pos.y - y;
+          if (dx * dx + dy * dy > r2) continue;
+          fn(m);
+        }
+      }
+    }
+  }
+
+  /** Array form of `forEachMobNear` (convenience for callers outside hot loops). */
+  mobsWithin(x: number, y: number, range: number): Mob[] {
+    const out: Mob[] = [];
+    this.forEachMobNear(x, y, range, (m) => out.push(m));
+    return out;
   }
 
   /**

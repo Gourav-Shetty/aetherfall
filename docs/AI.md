@@ -113,3 +113,95 @@ Tests: `ai/vision.test.ts` (cone/range edges, moving-or-close, both LoS
 legs), `ai/alert.test.ts` (noise->suspicious->patrol, taunt-once,
 search sweep + 6s lapse, seeded 40% bounds, mechanics, FSM coverage),
 `engine/src/los.test.ts` (rect/grid/combined + perf contract).
+
+## Spawner mob AI (`game/spawner-ai.ts`)
+
+Owner: `server/src/game/spawner-ai.ts` + one call in the existing 10Hz slot in
+`index.ts`. Everything else (spawn, loot, ids, `pruneSpawnSafe`) is untouched.
+
+The worldgen population — `gloomfang`, `ashcrawler`, `thornback`, `mistwisp`,
+`MOBS_PER_CHUNK` (4) per 32x32 chunk in an infinite world — used to have **no
+behaviour at all**: `Spawner.moveMob()` was only ever called from tests and
+`m.targetId` was only ever set to `null`, so every mob the player actually fought
+was a statue. The rich AI above only drove 3 fixed minions at (30,30)/(65,25)/
+(50,70), all outside the sight cone of spawn, which is why a new player
+essentially never met an AI-driven enemy.
+
+`SpawnerAI` reuses the existing machinery rather than a parallel system:
+
+| Piece      | Reused from                                        |
+| ---------- | -------------------------------------------------- |
+| Sight      | `ai/vision.ts` — cone, sneak leg, `canDetect`/`canTrack` |
+| Occlusion  | `engine/src/los.ts` — `gridLos` (worldgen tiles) + `rectLos` (`walls.json`) |
+| States     | `ai/fsm.ts` — `NPCFSM` per mob (idle/patrol/chase/attack/search) |
+| Budget     | `ai/npc.ts` — `MELEE_DAMAGE` 7, `MELEE_COOLDOWN` 1.5s, `LEASH_RANGE` 20 |
+| Movement   | `Spawner.moveMob` (re-files the spatial index) + `genChunk` tile rejection |
+| Tile grid  | `genChunk` (the same walkability the spawner itself uses), cached per chunk |
+
+### Behaviour
+
+1. **Idle/patrol** — a fresh mob dwells for 2–3s (the FSM idle timer), then
+   drifts between waypoints drawn from an id-seeded stream inside a **3–6u**
+   patrol radius, pausing 0.4–1.6s at each. Facing tracks the walk, so the cone
+   sweeps the neighbourhood and mobs notice approaching players without anyone
+   having to walk into them. A mob that cannot make progress for 1.5s re-rolls
+   its waypoint (wall rejection, not a statue).
+2. **Acquire** — `canDetect` for calm mobs (cone + range + LoS + the
+   moving-or-close leg), `canTrack` once alert. Sight pull is **12u**
+   (`SPAWNER_SIGHT_RANGE`, the same `AGGRO_RANGE` the legacy proximity pass uses)
+   and melee reach is **2.2u** (`combat.MELEE_RANGE`) so neither side
+   out-ranges the other.
+3. **Chase/attack** — 5.0u/s chase, 7 damage per hit on a **1.5s** cooldown,
+   the exact budget in docs/GAMEPLAY.md "Damage budget" (14 hits ≈ 21s to kill
+   a naked idle player). Chase speed is below the player's 8u/s
+   (`sim.MAX_SPEED`) so walking away always works: the **leash**, not the speed,
+   ends a fight.
+4. **Leash** — kited further than `LEASH_RANGE` (20u) from `mob.spawnPos`, the
+   mob clears its target and walks home at 3.5u/s. Re-acquisition is blocked
+   until it is actually back, so a kite cannot re-tug it forever. Losing sight
+   routes chase → `search`, which sweeps the last-known point at 2.0u/s and
+   then stands down to patrol.
+5. **Spawn-safe discs** — three layers, all keyed off `isSpawnSafeZone` /
+   `SPAWN_SAFE_POINTS`:
+   - a step whose destination lands inside a 12u disc is **refused**, so no mob
+     can be walked into the clear zone;
+   - a player standing inside a disc is **not targetable**, so chasing one ends
+     the moment they cross the line;
+   - when that happens an alert mob **breaks off and walks home** rather than
+     freezing on the boundary — a mob pressed against the clear zone still reads
+     as "camped on spawn". Patrol waypoints are projected out of the discs too.
+6. **Spawn protection** — a player with `spawnProtectedUntil` in the future is
+   never acquired and never hit (re-checked at swing time); `Sim.damagePlayer`
+   re-checks it again in `index.ts`, so the window holds end to end.
+7. **Dead / downed / stunned** — corpses, knockdowns (3s crawl) and thrown
+   sidearm stuns hold still and swing nothing, exactly like `ai/npc.ts`.
+
+### Performance
+
+Runs on the existing 10Hz NPC cadence, one call, reusing the `views` array the
+NPC tick already builds. Two early-outs: no players at all does nothing; and
+the awake set is gathered from the **player** side through the spawner's cell
+index (`forEachMobNear`), so cost is `O(players x nearby mobs)` rather than
+`O(all mobs x players)`. Measured on a pathological 6 379-mob world:
+**0.002 ms/tick** idle, **0.107 ms/tick** with 20 distant players, **0.205 ms/
+tick** with 20 players clustered (≈2 ms per wall-second, 0.2% of a core, well
+inside the 50 ms slow-tick budget). A realistic 391-mob shard costs 0.19 ms.
+
+### Ownership notes
+
+- The driver writes **its own** target (`SpawnerAiDebug.targetId`), never
+  `mob.targetId`. That field belongs to the legacy 20Hz proximity pass
+  (`game.tickGameplay` → `combat.updateAggro`), which knows nothing about cones,
+  line of sight, sneak or spawn protection. Letting a 10Hz driver overwrite it
+  would make the two rules flip-flop every tick and spam `mob-aggro`.
+- Mobs that were in play and then were not are rested through a small
+  `activeIds` set, so a mob that walks out of range resets its brain (fresh
+  patrol, no stale target) when a player comes back.
+- The engine-entity mirror (`mob-spawn` → `world.spawn`) is re-synced for the
+  handful of mobs the driver actually moved (`takeMoved()`), so `pos` never
+  drifts from the authoritative body.
+
+Tests: `game/spawner-ai.test.ts` — acquisition + hit inside 10s, the attack
+cadence floor, the sneak rule (and its control), leash return, the spawn-disc
+lure, spawn protection, patrol + wander bound, downed/stunned inertness, the
+early-outs, and the "kill still drops loot and emits the same events" regression.

@@ -60,6 +60,12 @@ import {
 const __game = createGameState(1337);
 const __mobEntity = new Map<number, number>(); // gameplay mob id -> engine entity id
 import { NPCManager } from './ai/npc.js';
+// SPAWNER-AI: the 10Hz brain for the deterministic worldgen population
+// (gloomfang/ashcrawler/thornback/mistwisp). Before this the only brains in the
+// game drove 3 fixed minions, so every mob the player actually fought was a
+// statue. Same tick cadence, same damage budget (MELEE_DAMAGE/MELEE_COOLDOWN
+// from ai/npc.ts), same `damage-player` -> `sim.damagePlayer` lane.
+import { SpawnerAI } from './game/spawner-ai.js';
 import { QuestGiverDialogue } from './ai/dialogue.js';
 import { unifiedMobSnapshot } from './game/mobs.js';
 // SYSTEMS: composes the pure systems/* modules (progression,
@@ -118,6 +124,9 @@ chatBus.subscribe((msg) => {
 });
 // AI-NPC: minions (FSM+BT) + 2 bosses, ticked at 10Hz inside the sim loop.
 const npcs = new NPCManager();
+// SPAWNER-AI: the same 10Hz slot for the worldgen mob population.
+const mobAi = new SpawnerAI(__game.spawner, { seed: __game.seed });
+mobAi.setWalls(sim.walls);
 const dialogues = new Map<number, QuestGiverDialogue>();
 
 /** Players + spawner mobs + NPCs/bosses merged — the single source for interest + snapshots. */
@@ -1086,6 +1095,7 @@ const metricsServer = createServer((req, res) => {
         try {
           const walls = parseWallsBody(body);
           sim.setWalls(walls);
+          mobAi.setWalls(walls);
           const file = saveWallsFile(walls);
           auditWallChange({ count: walls.length, file, ip });
           metrics.setPlayers(sockets.size);
@@ -1217,6 +1227,28 @@ function tickOnce(): void {
         // telegraph-only fields on the widened union.
         broadcast({ t: 'event', kind: e.kind, payload: e });
       }
+    }
+    // SPAWNER-AI @10Hz (dt=0.1): the worldgen mob population on the SAME 10Hz
+    // slot and the SAME `views` (so spawn protection rides along). Mobs that
+    // already have a target land 7 damage every 1.5s — the documented budget
+    // (docs/GAMEPLAY.md "Damage budget"), shared with ai/npc.ts via
+    // MELEE_DAMAGE/MELEE_COOLDOWN. `sim.damagePlayer` re-checks spawn
+    // protection, so a stale event cannot punch through the window either.
+    for (const e of mobAi.tick(0.1, views, Date.now())) {
+      const p = sim.players.get(e.targetId);
+      if (!p || p.hp <= 0) continue;
+      if (!sim.damagePlayer(e.targetId, e.amount, Date.now())) continue;
+      if (p.hp <= 0) {
+        sim.respawnPlayer(p.id, 50, 50, Date.now());
+        broadcast({ t: 'event', kind: 'respawn', payload: { id: p.id } });
+      }
+    }
+    // SPAWNER-AI: keep the engine-entity mirror (`mob-spawn` -> world.spawn)
+    // in step with the bodies the driver just moved.
+    for (const id of mobAi.takeMoved()) {
+      const eid = __mobEntity.get(id);
+      const m = __game.spawner.getMob(id);
+      if (eid !== undefined && m) sim.world.set(eid, 'pos', { x: m.pos.x, y: m.pos.y });
     }
     sNpc = performance.now() - c;
     const d = performance.now();
