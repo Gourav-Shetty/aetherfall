@@ -442,8 +442,13 @@ setInterval(() => {
     lastMove.x = x / l;
     lastMove.y = y / l;
   }
-  const atk = attackQueued;
+  const queuedCancel = pred.pollCancel();
+  let atk = attackQueued || queuedCancel === 'attack';
   attackQueued = false;
+  if (atk && pred.isHitStopped()) {
+    pred.queueCancel('attack');
+    atk = false;
+  }
   net.sendInput(++seq, x, y, atk ? { attack: true } : undefined);
   pred.applyInput(seq, x, y, 1 / 20);
   if (atk) swingFx();
@@ -1059,14 +1064,31 @@ net.onEvent = (kind, payload) => {
       break;
     }
     case 'hit-stop': {
-      // Freeze-frame on kills, gated by reduced motion (same gate as shake;
-      // audio cues still play).
-      if (!a11y.motionEnabled()) break;
       const ms = num('durationMs');
-      const dur = ms !== null ? Math.max(0, Math.min(500, ms)) : 90;
+      const dur = ms !== null ? Math.max(0, Math.min(500, ms)) : 100;
       if (dur <= 0) break;
-      if (iso && activeMode === 'three') iso.hitStop(dur);
-      else if (c2d) c2d.hitStop(dur);
+      pred.applyHitstop(dur);
+      if (a11y.motionEnabled()) {
+        if (iso && activeMode === 'three') iso.hitStop(dur);
+        else if (c2d) c2d.hitStop(dur);
+        shake(0.2);
+      }
+      const hx = num('x');
+      const hy = num('y');
+      if (hx !== null && hy !== null && a11y.motionEnabled()) {
+        if (iso && activeMode === 'three') iso.impactBurst(hx, hy);
+        else if (c2d) c2d.burst(hx, hy, '#fff2b0', 6);
+      }
+      break;
+    }
+    case 'hit-spark': {
+      if (!a11y.motionEnabled()) break;
+      const sx = num('x');
+      const sy = num('y');
+      if (sx !== null && sy !== null) {
+        if (iso && activeMode === 'three') iso.impactBurst(sx, sy);
+        else if (c2d) c2d.burst(sx, sy, '#fff2b0', 6);
+      }
       break;
     }
     case 'mob-spawn':

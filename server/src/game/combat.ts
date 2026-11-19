@@ -33,19 +33,21 @@ export type Mob = Fighter & {
   spawnPos: Vec;
   targetId: number | null; // aggro target player id
   name: string;
+  weaponId?: string | null;
 };
 
 export function makeFighter(id: number, x: number, y: number, level = 1, maxHp = MAX_HP): Fighter {
   return { id, pos: { x, y }, hp: maxHp, maxHp, alive: true, lastAttackAt: -Infinity, respawnAt: 0, level };
 }
 
-export function makeMob(id: number, x: number, y: number, name = 'gloomfang', level = 1): Mob {
+export function makeMob(id: number, x: number, y: number, name = 'gloomfang', level = 1, weaponId?: string | null): Mob {
   const maxHp = MAX_HP + (level - 1) * 20;
   return {
     ...makeFighter(id, x, y, level, maxHp),
     spawnPos: { x, y },
     targetId: null,
     name,
+    weaponId: weaponId ?? null,
   };
 }
 

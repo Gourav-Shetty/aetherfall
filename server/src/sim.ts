@@ -8,7 +8,21 @@ import { getBiome, getZone, tileFlagsFor, type TileFlags, type TileHazard } from
 // disagree with the safe discs. See engine/src/spawn-anchors.ts.
 import { SHRINE_SPAWN, anchorNearestOn, spawnAnchorFor } from '@aetherfall/engine';
 import { TERRAIN_SEED } from './terrain_sys.js';
-import type { EntitySnapshot } from '@aetherfall/shared';
+import {
+  type EntitySnapshot,
+  GROUND_ACCEL,
+  GROUND_FRICTION,
+  JUMP_IMPULSE,
+  KNOCKBACK_IMPULSE,
+  HIT_RECOIL_IMPULSE,
+  DASH_IMPULSE,
+  VERTICAL_GRAVITY,
+  VERTICAL_FRICTION,
+  MAX_SPEED as SHARED_MAX_SPEED,
+  HITSTOP_DEFAULT_MS,
+  DASH_IFRAME_MS,
+  SDI_NUDGE_DIST,
+} from '@aetherfall/shared';
 // WALLS: shared wall schema + slide collision (additive).
 import { PLAYER_RADIUS, circleHitsWalls, moveWithSlide, type WallRect } from '@aetherfall/shared';
 // TERRAIN: engine terrain field (height / hazard /
@@ -23,6 +37,9 @@ export type SimPlayer = {
   y: number;
   vx: number;
   vy: number;
+  vz?: number;
+  moveX?: number;
+  moveY?: number;
   hp: number;
   maxHp: number;
   seq: number;
@@ -34,6 +51,13 @@ export type SimPlayer = {
    * isSpawnProtected(); the HUD shows a shield badge while it covers now.
    */
   protectedUntil: number;
+  /** Hitstop freeze end timestamp (ms). Simulation holds still while now < hitstopUntil. */
+  hitstopUntil?: number;
+  /** Invulnerability frames timestamp (ms) on dash/roll. */
+  iframeUntil?: number;
+  /** Buffered input during hitstop cancel window. */
+  cancelAction?: 'attack' | 'dash' | 'skill';
+  cancelActionAt?: number;
 };
 
 /** ms of spawn protection granted on join and on shrine respawn. */
@@ -67,10 +91,10 @@ export type SimOptions = {
   snapshotZ?: boolean;
 };
 
-export const MAX_SPEED = 8; // units/sec, authoritative
+export const MAX_SPEED = SHARED_MAX_SPEED; // units/sec, authoritative
 export const ARENA_W = 100;
 export const ARENA_H = 100;
-const FRICTION = 0.9;
+export { GROUND_ACCEL, GROUND_FRICTION, JUMP_IMPULSE, KNOCKBACK_IMPULSE, HIT_RECOIL_IMPULSE, DASH_IMPULSE };
 
 export class Sim {
   world = new World();
@@ -173,7 +197,22 @@ export class Sim {
     }
     const spawn = this.findFreeSpawn(px, py);
     // PLAYABILITY: spawn at full HP with 3s of protection (see protectedUntil).
-    const p: SimPlayer = { id, name, x: spawn.x, y: spawn.y, vx: 0, vy: 0, hp: 100, maxHp: 100, seq: 0, z: 0, protectedUntil: nowMs + SPAWN_PROTECTION_MS };
+    const p: SimPlayer = {
+      id,
+      name,
+      x: spawn.x,
+      y: spawn.y,
+      vx: 0,
+      vy: 0,
+      vz: 0,
+      moveX: 0,
+      moveY: 0,
+      hp: 100,
+      maxHp: 100,
+      seq: 0,
+      z: 0,
+      protectedUntil: nowMs + SPAWN_PROTECTION_MS,
+    };
     // TERRAIN: publish z before the first snapshot so a client that joins
     // mid-tick never sees a player at sea level standing on a hill.
     if (this.terrain !== null) p.z = this.terrain.zAt(p.x, p.y);
@@ -193,12 +232,116 @@ export class Sim {
     this.rebuildSpatial();
   }
 
+  setInput(id: number, moveX: number, moveY: number, seq: number): void {
+    const p = this.players.get(id);
+    if (!p) return;
+    p.moveX = moveX;
+    p.moveY = moveY;
+    p.seq = seq;
+  }
+
   setVelocity(id: number, vx: number, vy: number, seq: number): void {
     const p = this.players.get(id);
     if (!p) return;
     p.vx = vx;
     p.vy = vy;
     p.seq = seq;
+    const mag = Math.hypot(vx, vy);
+    if (mag > 0) {
+      p.moveX = vx / (MAX_SPEED || 1);
+      p.moveY = vy / (MAX_SPEED || 1);
+    } else {
+      p.moveX = 0;
+      p.moveY = 0;
+    }
+  }
+
+  applyImpulse(id: number, impulseX: number, impulseY: number, impulseZ?: number): void {
+    const p = this.players.get(id);
+    if (!p) return;
+    p.vx += impulseX;
+    p.vy += impulseY;
+    if (impulseZ !== undefined) {
+      p.vz = (p.vz ?? 0) + impulseZ;
+    }
+  }
+
+  applyJump(id: number, impulse = JUMP_IMPULSE): boolean {
+    const p = this.players.get(id);
+    if (!p) return false;
+    const groundZ = this.terrain ? this.terrain.zAt(p.x, p.y) : 0;
+    if ((p.z ?? 0) <= groundZ + 0.05 && (p.vz ?? 0) <= 0.1) {
+      p.vz = impulse;
+      return true;
+    }
+    return false;
+  }
+
+  applyDash(id: number, dirX: number, dirY: number, impulse = DASH_IMPULSE, nowMs = Date.now()): void {
+    const p = this.players.get(id);
+    if (!p) return;
+    const mag = Math.hypot(dirX, dirY);
+    if (mag > 0) {
+      p.vx = (dirX / mag) * impulse;
+      p.vy = (dirY / mag) * impulse;
+    }
+    p.iframeUntil = nowMs + DASH_IFRAME_MS;
+  }
+
+  /** Hitstop freeze (authoritative hit pause on every connect). */
+  applyHitstop(id: number, durationMs = HITSTOP_DEFAULT_MS, nowMs = Date.now()): void {
+    const p = this.players.get(id);
+    if (!p) return;
+    p.hitstopUntil = Math.max(p.hitstopUntil ?? 0, nowMs + durationMs);
+  }
+
+  isHitStopped(id: number, nowMs = Date.now()): boolean {
+    const p = this.players.get(id);
+    return !!p && (p.hitstopUntil ?? 0) > nowMs;
+  }
+
+  /** Invulnerability from spawn protection or roll/dash i-frames. */
+  isInvulnerable(id: number, nowMs = Date.now()): boolean {
+    const p = this.players.get(id);
+    return !!p && ((p.protectedUntil ?? 0) > nowMs || (p.iframeUntil ?? 0) > nowMs);
+  }
+
+  /** Smash Directional Influence (SDI): subtle directional nudge during hitstop freeze. */
+  applySdi(id: number, moveX: number, moveY: number, nudgeDist = SDI_NUDGE_DIST): boolean {
+    const p = this.players.get(id);
+    if (!p) return false;
+    const mag = Math.hypot(moveX, moveY);
+    if (mag <= 0) return false;
+    const nx = p.x + (moveX / mag) * nudgeDist;
+    const ny = p.y + (moveY / mag) * nudgeDist;
+    if (this.isFreeSpot(nx, ny)) {
+      p.x = nx;
+      p.y = ny;
+      return true;
+    }
+    return false;
+  }
+
+  /** Queue an action during hitstop for immediate execution upon freeze completion (SF2 cancel). */
+  queueCancelAction(id: number, action: 'attack' | 'dash' | 'skill', nowMs = Date.now()): void {
+    const p = this.players.get(id);
+    if (!p) return;
+    p.cancelAction = action;
+    p.cancelActionAt = nowMs;
+  }
+
+  /** Consume any buffered cancel action if hitstop has expired. */
+  consumeCancelAction(id: number, nowMs = Date.now()): ('attack' | 'dash' | 'skill') | null {
+    const p = this.players.get(id);
+    if (!p || !p.cancelAction) return null;
+    if ((p.hitstopUntil ?? 0) > nowMs) return null;
+    if (nowMs - (p.cancelActionAt ?? 0) > 300) {
+      p.cancelAction = undefined;
+      return null;
+    }
+    const act = p.cancelAction;
+    p.cancelAction = undefined;
+    return act;
   }
 
   getPos(id: number): { x: number; y: number } | undefined {
@@ -220,13 +363,13 @@ export class Sim {
   }
 
   /**
-   * Authoritative damage entry point that honors spawn protection.
+   * Authoritative damage entry point that honors spawn protection and dash i-frames.
    * Returns false when protected (no HP removed) or the player is unknown.
    */
   damagePlayer(id: number, amount: number, nowMs: number = Date.now()): boolean {
     const p = this.players.get(id);
     if (!p || amount <= 0) return false;
-    if ((p.protectedUntil ?? 0) > nowMs) return false;
+    if (this.isInvulnerable(id, nowMs)) return false;
     p.hp = Math.max(0, p.hp - amount);
     return true;
   }
@@ -351,12 +494,71 @@ export class Sim {
   }
 
   /** Deterministic fixed-step integration. No randomness here. */
-  step(dt: number): void {
+  step(dt: number, nowMs = Date.now()): void {
     this.tick++;
     for (const hook of this.preSystems) hook(this, dt);
     // TERRAIN: one branch per tick instead of one call per player.
     const hasTerrain = this.terrain !== null;
     for (const p of this.players.values()) {
+      // Hitstop freeze: sim holds still while frozen.
+      if ((p.hitstopUntil ?? 0) > nowMs) {
+        const inX = p.moveX ?? 0;
+        const inY = p.moveY ?? 0;
+        if (inX !== 0 || inY !== 0) {
+          this.applySdi(p.id, inX, inY);
+        }
+        p.moveX = 0;
+        p.moveY = 0;
+        continue;
+      }
+
+      // Venturelli's model:
+      // 1. Accel -> velocity
+      const inX = p.moveX ?? 0;
+      const inY = p.moveY ?? 0;
+      const inMag = Math.hypot(inX, inY);
+      if (inMag > 0) {
+        const dirX = inMag > 1 ? inX / inMag : inX;
+        const dirY = inMag > 1 ? inY / inMag : inY;
+        p.vx += dirX * GROUND_ACCEL * dt;
+        p.vy += dirY * GROUND_ACCEL * dt;
+      }
+
+      // 2. Friction -> velocity
+      const speed = Math.hypot(p.vx, p.vy);
+      if (speed > 0) {
+        const newSpeed = Math.max(0, speed - GROUND_FRICTION * dt);
+        const scale = newSpeed / speed;
+        p.vx *= scale;
+        p.vy *= scale;
+      }
+
+      // 3. Clamp (normal movement clamps to MAX_SPEED; impulses bleed via friction)
+      const currSpeed = Math.hypot(p.vx, p.vy);
+      if (inMag > 0 && currSpeed > MAX_SPEED) {
+        p.vx = (p.vx / currSpeed) * MAX_SPEED;
+        p.vy = (p.vy / currSpeed) * MAX_SPEED;
+      }
+
+      // 4. Vertical Jump / Gravity / Friction (only when jumping or in air)
+      if (p.vz !== undefined && (p.vz !== 0 || (p.z ?? 0) > (this.terrain ? this.terrain.zAt(p.x, p.y) : 0))) {
+        const groundHeight = this.terrain ? this.terrain.zAt(p.x, p.y) : 0;
+        let vz = p.vz ?? 0;
+        vz -= VERTICAL_GRAVITY * dt;
+        if (Math.abs(vz) > 0) {
+          const vDir = Math.sign(vz);
+          const vMag = Math.max(0, Math.abs(vz) - VERTICAL_FRICTION * dt);
+          vz = vDir * vMag;
+        }
+        let z = (p.z ?? 0) + vz * dt;
+        if (z <= groundHeight) {
+          z = groundHeight;
+          vz = 0;
+        }
+        p.z = z;
+        p.vz = vz;
+      }
+
       // WALLS: axis-separated slide (X then Y) so diagonal motion
       // along a wall keeps the free axis instead of sticking.
       const moved = moveWithSlide(p.x, p.y, p.vx * dt, p.vy * dt, PLAYER_RADIUS, this.walls);
@@ -381,17 +583,21 @@ export class Sim {
           }
         }
       }
+      if (nx === p.x && p.vx !== 0) p.vx = 0;
+      if (ny === p.y && p.vy !== 0) p.vy = 0;
       p.x = nx;
       p.y = ny;
       if (p.x < 0) p.x = 0;
       else if (p.x > this.boundsW) p.x = this.boundsW;
       if (p.y < 0) p.y = 0;
       else if (p.y > this.boundsH) p.y = this.boundsH;
-      p.vx *= FRICTION;
-      p.vy *= FRICTION;
+
       // snap tiny velocities to zero for determinism across platforms
-      if (Math.abs(p.vx) < 1e-9) p.vx = 0;
-      if (Math.abs(p.vy) < 1e-9) p.vy = 0;
+      if (Math.abs(p.vx) < 1e-6) p.vx = 0;
+      if (Math.abs(p.vy) < 1e-6) p.vy = 0;
+      // Consume input for this tick: if client stops sending inputs, body coasts and stops
+      p.moveX = 0;
+      p.moveY = 0;
       const eid = this.entityByPlayer.get(p.id);
       if (eid !== undefined) {
         this.world.set(eid, 'pos', { x: p.x, y: p.y });

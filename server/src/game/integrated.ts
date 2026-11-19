@@ -668,6 +668,15 @@ export class GameSession {
     return this.vocations.get(playerId) ?? null;
   }
 
+  /** The equipped mainhand weapon id, or null when unarmed. */
+  equippedWeapon(playerId: number): string | null {
+    const items = this.loadout.get(playerId) ?? [];
+    for (const it of items) {
+      if (weaponDefFor(it.itemId)) return it.itemId;
+    }
+    return null;
+  }
+
   /** Extra loot rolls from the worn mask (tithe scale). */
   extraLootRolls(playerId: number): number {
     return maskExtraLootRolls(this.activeMask(playerId));

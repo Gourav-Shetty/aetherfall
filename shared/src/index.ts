@@ -1,5 +1,8 @@
 // @aetherfall/shared — protocol v1, types, seeded RNG, codec
 export * from './catalog.js';
+export * from './physics.js';
+export * from './combat_specs.js';
+export * from './mob_ai_specs.js';
 export const PROTOCOL_VERSION = 1;
 export const TICK_HZ = 20;
 export const SNAPSHOT_HZ = 10;
@@ -24,6 +27,7 @@ export type ClientInput = {
   seq: number; dt: number;
   move: Vec2; attack?: boolean; skill?: number;
   chat?: string; targetId?: number;
+  jump?: boolean; dash?: boolean;
 };
 
 export type ServerMsg =

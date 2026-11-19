@@ -16,6 +16,7 @@ import {
   SPAWNER_MELEE_RANGE,
   SPAWNER_SIGHT_RANGE,
   SpawnerAI,
+  type SpawnerAiEvent,
 } from './spawner-ai.js';
 import { SPAWN_SAFE_RADIUS, isSpawnSafeZone, Spawner } from './spawner.js';
 import { LEASH_RANGE, MELEE_COOLDOWN, MELEE_DAMAGE } from '../ai/npc.js';
@@ -437,13 +438,14 @@ describe('spawner AI: mobs are visibly alive', () => {
     const mob = spawner.mobsList()[0]!;
     const before = { x: mob.pos.x, y: mob.pos.y };
     let maxHome = 0;
+    let maxMoved = 0;
     for (let i = 0; i < 120; i++) {
       ai.tick(DT, [view(mob.pos.x + 24, mob.pos.y)], T0 + i * 100);
       const d = Math.hypot(mob.pos.x - mob.spawnPos.x, mob.pos.y - mob.spawnPos.y);
       maxHome = Math.max(maxHome, d);
+      maxMoved = Math.max(maxMoved, Math.hypot(mob.pos.x - before.x, mob.pos.y - before.y));
     }
-    const moved = Math.hypot(mob.pos.x - before.x, mob.pos.y - before.y);
-    assert.ok(moved > 2, `mob drifted only ${moved.toFixed(2)}u in 12s — still a statue`);
+    assert.ok(maxMoved > 2, `mob drifted only ${maxMoved.toFixed(2)}u in 12s — still a statue`);
     assert.ok(
       maxHome <= PATROL_RADIUS_MAX + 1,
       `wandered ${maxHome.toFixed(1)}u from home (patrol radius ${PATROL_RADIUS_MAX})`,
@@ -656,5 +658,132 @@ describe('spawner AI: no regression in the existing mob pipeline', () => {
     }
     assert.equal(mob.targetId, null, 'the AI must not write the legacy targetId');
     assert.equal(ai.debugMob(mob.id)!.targetId, 1, 'the AI must own its own target');
+  });
+});
+
+describe('spawner AI: weapon-aware behaviors (Phase 3: The Hotline Miami insight)', () => {
+  it('ranged mob holds distance (5u..8u) and repositions away when player approaches', () => {
+    const { spawner, ai } = world();
+    const mob = spawner.mobsList()[0]!;
+    mob.weaponId = 'wisp-bolt';
+    mob.spawnPos = { x: 6, y: 20 };
+    spawner.moveMob(mob.id, 6, 20);
+
+    // Player in optimal hold band [5u, 8u] (dist = 6u)
+    const pOptimal = { id: 1, x: 12, y: 20, vx: 0.8, vy: 0, hp: 100 };
+    const attacks: SpawnerAiEvent[] = [];
+    for (let i = 0; i < 5; i++) {
+      const ev = ai.tick(DT, [pOptimal], T0 + i * 100);
+      attacks.push(...ev);
+    }
+    const dbgHold = ai.debugMob(mob.id)!;
+    assert.equal(dbgHold.loadoutKind, 'ranged');
+    assert.equal(dbgHold.substate, 'hold-distance', 'ranged mob did not hold distance in pocket');
+    assert.ok(attacks.length >= 1, 'ranged mob never fired attacks on cooldown');
+
+    // Player rushes inside minimum range (< 5u, dist = 2.5u)
+    const pClose = { id: 1, x: mob.pos.x + 2.5, y: mob.pos.y, vx: 0.8, vy: 0, hp: 100 };
+    const prevX = mob.pos.x;
+    for (let i = 0; i < 3; i++) {
+      ai.tick(DT, [pClose], T0 + 1000 + i * 100);
+    }
+    const dbgRepo = ai.debugMob(mob.id)!;
+    assert.equal(dbgRepo.substate, 'reposition', 'ranged mob did not reposition when crowded');
+    assert.ok(mob.pos.x < prevX, 'ranged mob did not retreat back away from crowding player');
+  });
+
+  it('melee mob charges aggressively at speed (6.8u/s) and strikes within reach', () => {
+    const { spawner, ai } = world();
+    const mob = spawner.mobsList()[0]!;
+    mob.weaponId = 'ward-blade';
+    mob.spawnPos = { x: 6, y: 20 };
+    spawner.moveMob(mob.id, 6, 20);
+
+    const p = { id: 1, x: 11, y: 20, vx: 0.8, vy: 0, hp: 100 };
+    const startX = mob.pos.x;
+    ai.tick(DT, [p], T0);
+    const dbgCharge = ai.debugMob(mob.id)!;
+    assert.equal(dbgCharge.loadoutKind, 'melee');
+    assert.equal(dbgCharge.substate, 'charge', 'melee mob did not charge');
+    const chargeSpeed = (mob.pos.x - startX) / DT;
+    assert.ok(
+      Math.abs(chargeSpeed - 6.8) < 0.05,
+      `melee mob charge speed expected ~6.8u/s, got ${chargeSpeed.toFixed(2)}`,
+    );
+
+    // Continue ticking until engagement reach
+    for (let i = 1; i < 15; i++) {
+      ai.tick(DT, [p], T0 + i * 100);
+    }
+    const dbgStrike = ai.debugMob(mob.id)!;
+    assert.equal(dbgStrike.substate, 'strike', 'melee mob did not enter strike state within weapon reach');
+    assert.ok(Math.hypot(p.x - mob.pos.x, p.y - mob.pos.y) <= 2.2, 'mob stopped outside attack reach');
+  });
+
+  it('unarmed brawler fights at full HP, then panics and flees when HP <= 35%', () => {
+    const { spawner, ai } = world();
+    const mob = spawner.mobsList()[0]!;
+    mob.weaponId = 'unarmed';
+    mob.spawnPos = { x: 6, y: 20 };
+    mob.maxHp = 100;
+    mob.hp = 100;
+    spawner.moveMob(mob.id, 6, 20);
+
+    const p = { id: 1, x: 9, y: 20, vx: 0.8, vy: 0, hp: 100 };
+    ai.tick(DT, [p], T0);
+    const dbgFull = ai.debugMob(mob.id)!;
+    assert.equal(dbgFull.loadoutKind, 'unarmed');
+    assert.equal(dbgFull.state, 'chase', 'unarmed mob was not aggressive at full HP');
+
+    // Mob drops below 35% HP threshold
+    mob.hp = 30;
+    const prevX = mob.pos.x;
+    ai.tick(DT, [p], T0 + 100);
+    const dbgLow = ai.debugMob(mob.id)!;
+    assert.equal(dbgLow.state, 'flee', 'unarmed mob did not transition to flee state');
+    assert.equal(dbgLow.substate, 'flee');
+    const fleeSpeed = (prevX - mob.pos.x) / DT;
+    assert.ok(
+      Math.abs(fleeSpeed - 6.2) < 0.05,
+      `unarmed mob flee speed expected ~6.2u/s, got ${fleeSpeed.toFixed(2)}`,
+    );
+  });
+
+  it('two mobs with different weapons behave visibly differently to a spectator', () => {
+    const { spawner, ai } = world();
+    const mRanged = spawner.mobsList()[0]!;
+    const mMelee = spawner.mobsList()[1]!;
+    mRanged.weaponId = 'wisp-bolt';
+    mRanged.spawnPos = { x: 7, y: 19 };
+    spawner.moveMob(mRanged.id, 7, 19);
+
+    mMelee.weaponId = 'ward-blade';
+    mMelee.spawnPos = { x: 7, y: 22 };
+    spawner.moveMob(mMelee.id, 7, 22);
+
+    const p1 = { id: 1, x: 10, y: 19, vx: 0.8, vy: 0, hp: 100 };
+    const p2 = { id: 2, x: 10, y: 22, vx: 0.8, vy: 0, hp: 100 };
+
+    const rBefore = mRanged.pos.x;
+    const mBefore = mMelee.pos.x;
+
+    ai.tick(DT, [p1, p2], T0);
+
+    const rDbg = ai.debugMob(mRanged.id)!;
+    const mDbg = ai.debugMob(mMelee.id)!;
+
+    const rDelta = mRanged.pos.x - rBefore;
+    const mDelta = mMelee.pos.x - mBefore;
+
+    // Spectator observes:
+    // 1. Opposite movement directions: ranged retreats away from approaching player, melee charges toward
+    assert.ok(rDelta < 0, `ranged mob must back away (delta=${rDelta.toFixed(2)})`);
+    assert.ok(mDelta > 0, `melee mob must charge forward (delta=${mDelta.toFixed(2)})`);
+
+    // 2. Different tactical substates and archetypes
+    assert.equal(rDbg.loadoutKind, 'ranged');
+    assert.equal(mDbg.loadoutKind, 'melee');
+    assert.equal(rDbg.substate, 'reposition');
+    assert.equal(mDbg.substate, 'charge');
   });
 });

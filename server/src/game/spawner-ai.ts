@@ -27,9 +27,14 @@
 // ACTIVE_RADIUS. An idle shard pays one squared-distance test per mob and moves
 // nothing.
 
-import { genChunk, rectLos } from '@aetherfall/engine';
+import { genChunk, gridLos, rectLos } from '@aetherfall/engine';
 import type { LosRect } from '@aetherfall/engine';
-import { mulberry32 } from '@aetherfall/shared';
+import {
+  getMobLoadout,
+  mulberry32,
+  type MobLoadoutKind,
+  type MobLoadoutProfile,
+} from '@aetherfall/shared';
 import { AGGRO_RANGE, MELEE_RANGE, type Mob } from './combat.js';
 import {
   SPAWN_SAFE_POINTS,
@@ -137,12 +142,19 @@ export interface SpawnerAiDebug {
   homing: boolean;
   /** ms timestamp of the last swing (attack cadence). */
   attackAt: number;
+  weaponId: string;
+  loadoutKind: MobLoadoutKind;
+  substate?: string;
 }
 
 /** Per-mob brain state. Held in a WeakMap keyed by the Mob so it cannot outlive
  *  the mob (no id-reuse leak) and `combat.ts` stays untouched. */
 interface AiState {
   fsm: NPCFSM;
+  /** Weapon loadout profile */
+  loadout: MobLoadoutProfile;
+  /** Tactical substate for spectator and tests */
+  substate?: string;
   /** Deterministic per-id stream (patrol radius, waypoints, dwell). */
   rng: () => number;
   /** Patrol radius for this mob, drawn once from `rng`. */
@@ -255,6 +267,7 @@ export class SpawnerAI {
     const m = this.spawner.getMob(id);
     if (!m) return undefined;
     const st = this.ai.get(m);
+    const loadout = st ? st.loadout : getMobLoadout(m.weaponId, m.name);
     return {
       id: m.id,
       x: m.pos.x,
@@ -265,6 +278,9 @@ export class SpawnerAI {
       targetId: st ? st.targetId : null,
       homing: st ? st.homing : false,
       attackAt: st ? st.attackAt : -Infinity,
+      weaponId: loadout.weaponId,
+      loadoutKind: loadout.kind,
+      substate: st ? st.substate : undefined,
     };
   }
 
@@ -281,7 +297,8 @@ export class SpawnerAI {
     const m = this.spawner.getMob(mobId);
     const st = m ? this.ai.get(m) : undefined;
     if (!m || !st) return false;
-    return canDetect(this.sightQuery(m, st, tx, ty, SPAWNER_SIGHT_RANGE, targetSpeed));
+    const effSpeed = targetSpeed / Math.max(0.1, st.loadout.alertThreshold);
+    return canDetect(this.sightQuery(m, st, tx, ty, st.loadout.sightRange, effSpeed));
   }
 
   // ------------------------------------------------------------------ tick
@@ -396,9 +413,11 @@ export class SpawnerAI {
     // Deterministic stagger/stream derived from the mob id (same idiom as
     // ai/npc.ts), so a given world always behaves the same way.
     const rng = mulberry32(((Math.imul(m.id, 2654435761) >>> 0) ^ 0x9e3779b9) >>> 0);
+    const loadout = getMobLoadout(m.weaponId, m.name);
     const patrolR = PATROL_RADIUS_MIN + rng() * (PATROL_RADIUS_MAX - PATROL_RADIUS_MIN);
     const st: AiState = {
       fsm: new NPCFSM('idle', 2.0 + rng() * 1.0),
+      loadout,
       rng,
       patrolR,
       facing: 0,
@@ -452,9 +471,10 @@ export class SpawnerAI {
     // ALERT states (chase/attack/search) drop the movement leg via canTrack;
     // calm states use canDetect so a perfectly still player beyond 4u is
     // invisible (sneak).
+    const loadout = st.loadout;
     const alert =
       st.fsm.state === 'chase' || st.fsm.state === 'attack' || st.fsm.state === 'search';
-    const range = SPAWNER_SIGHT_RANGE;
+    const range = loadout.sightRange;
     let target: PlayerView | null = null;
     let dist = Infinity;
     // Set when a player inside the sight pull is standing in a spawn-safe
@@ -473,7 +493,8 @@ export class SpawnerAI {
         }
         if (d >= dist || d > range) continue;
         this.stats.sensed++;
-        const q = this.sightQuery(m, st, p.x, p.y, range, speeds.get(p.id) ?? 0);
+        const effSpeed = (speeds.get(p.id) ?? 0) / Math.max(0.1, loadout.alertThreshold);
+        const q = this.sightQuery(m, st, p.x, p.y, range, effSpeed);
         if (alert ? canTrack(q) : canDetect(q)) {
           dist = d;
           target = p;
@@ -504,24 +525,29 @@ export class SpawnerAI {
     }
 
     // --- 3. FSM ---------------------------------------------------------
-    // fleeThreshold 0: spawner mobs are the chaff, they never break off.
+    // Weapon loadout determines flee threshold and engagement range
     let state = st.fsm.update(dt, {
       hp: m.hp,
       maxHp: m.maxHp,
       targetVisible: target !== null,
       distToTarget: target ? dist : Infinity,
-      attackRange: SPAWNER_MELEE_RANGE,
+      attackRange: loadout.attackRange,
       aggroRange: range,
-      fleeThreshold: 0,
+      fleeThreshold: loadout.fleeThreshold,
     });
     if (st.homing) {
       // Straight home: the FSM would otherwise comb the last-seen point.
       st.fsm.force('patrol');
       state = 'patrol';
+    } else if (!loadout.allowedStates.includes(state as any)) {
+      // If FSM elected a state disallowed by loadout, re-route to combat
+      if (state === 'flee') state = 'attack';
+      st.fsm.force(state);
     }
 
     // --- 4. act ---------------------------------------------------------
     if (st.homing) {
+      st.substate = 'homing';
       st.homeT += dt;
       if (dHome <= 1.0 || st.homeT > HOMING_TIMEOUT_SEC) {
         st.homing = false;
@@ -533,48 +559,159 @@ export class SpawnerAI {
     }
 
     switch (state) {
-      case 'attack': {
-        if (!target) break;
-        st.facing = faceToward(m.pos.x, m.pos.y, target.x, target.y);
-        if (dist <= SPAWNER_MELEE_RANGE && nowMs - st.attackAt >= MELEE_COOLDOWN * 1000) {
-          st.attackAt = nowMs;
-          // Re-check protection at swing time: a target may have respawned into
-          // protection between acquisition and this tick.
-          if ((target.spawnProtectedUntil ?? 0) <= nowMs) {
-            ev.push({
-              kind: 'damage-player',
-              targetId: target.id,
-              amount: MELEE_DAMAGE,
-              fromId: m.id,
-            });
+      case 'flee': {
+        st.substate = 'flee';
+        const escapeFrom = target ?? st.lastSeen;
+        if (escapeFrom) {
+          const dx = m.pos.x - escapeFrom.x;
+          const dy = m.pos.y - escapeFrom.y;
+          const d = Math.hypot(dx, dy);
+          if (d > 1e-4) {
+            st.facing = Math.atan2(dy, dx);
+            const destX = m.pos.x + (dx / d) * 8.0;
+            const destY = m.pos.y + (dy / d) * 8.0;
+            this.step(m, st, destX, destY, loadout.combatSpeed, dt);
           }
-        } else if (dist > SPAWNER_MELEE_RANGE) {
-          this.step(m, st, target.x, target.y, CHASE_SPEED, dt);
         }
         break;
       }
+      case 'attack':
       case 'chase': {
-        if (target) this.step(m, st, target.x, target.y, CHASE_SPEED, dt);
+        if (!target) break;
+        st.facing = faceToward(m.pos.x, m.pos.y, target.x, target.y);
+
+        if (loadout.kind === 'ranged') {
+          // Ranged loadout holds distance and repositions
+          const minR = loadout.preferredRangeMin ?? 5.0;
+          const maxR = loadout.preferredRangeMax ?? 8.0;
+          if (dist < minR) {
+            // Target closed inside minimum range: back away to hold distance!
+            const awayX = m.pos.x - target.x;
+            const awayY = m.pos.y - target.y;
+            const destX = m.pos.x + (awayX / dist) * 4.0;
+            const destY = m.pos.y + (awayY / dist) * 4.0;
+            this.step(m, st, destX, destY, loadout.combatSpeed, dt);
+            st.substate = 'reposition';
+          } else if (dist <= maxR) {
+            // In optimal pocket: hold distance, strafe laterally, and fire on cooldown
+            const perpX = -(target.y - m.pos.y) / dist;
+            const perpY = (target.x - m.pos.x) / dist;
+            const strafeSign = (m.id % 2 === 0 ? 1 : -1);
+            const destX = m.pos.x + perpX * strafeSign * 2.0;
+            const destY = m.pos.y + perpY * strafeSign * 2.0;
+            this.step(m, st, destX, destY, loadout.patrolSpeed * 1.5, dt);
+            st.substate = 'hold-distance';
+
+            if (nowMs - st.attackAt >= MELEE_COOLDOWN * 1000) {
+              st.attackAt = nowMs;
+              if ((target.spawnProtectedUntil ?? 0) <= nowMs) {
+                ev.push({
+                  kind: 'damage-player',
+                  targetId: target.id,
+                  amount: MELEE_DAMAGE,
+                  fromId: m.id,
+                });
+              }
+            }
+          } else {
+            // Out of range: close in
+            this.step(m, st, target.x, target.y, loadout.chaseSpeed, dt);
+          }
+          st.facing = faceToward(m.pos.x, m.pos.y, target.x, target.y);
+        } else if (loadout.kind === 'melee') {
+          // Melee loadout charges and flanks
+          if (dist <= loadout.attackRange) {
+            st.substate = 'strike';
+            if (nowMs - st.attackAt >= MELEE_COOLDOWN * 1000) {
+              st.attackAt = nowMs;
+              if ((target.spawnProtectedUntil ?? 0) <= nowMs) {
+                ev.push({
+                  kind: 'damage-player',
+                  targetId: target.id,
+                  amount: MELEE_DAMAGE,
+                  fromId: m.id,
+                });
+              }
+            }
+          } else {
+            let destX = target.x;
+            let destY = target.y;
+            let spd = loadout.chaseSpeed;
+            if (dist > 2.5 && dist < 7.5) {
+              spd = loadout.combatSpeed; // Rapid charge speed!
+              st.substate = 'charge';
+              destX = target.x;
+              destY = target.y;
+            } else {
+              // Close-in flank: wrap around the target while preserving sightline
+              st.substate = 'flank';
+              const flankSign = (m.id % 2 === 0 ? 1 : -1);
+              const directAngle = Math.atan2(target.y - m.pos.y, target.x - m.pos.x);
+              const offsetDist = Math.max(1.0, loadout.attackRange * 0.85);
+              let flanked = false;
+              for (const sign of [flankSign, -flankSign]) {
+                const flankAngle = directAngle + sign * 0.52; // ~30 deg
+                const tryX = target.x - Math.cos(flankAngle) * offsetDist;
+                const tryY = target.y - Math.sin(flankAngle) * offsetDist;
+                if (!this.blocked(m.pos.x, m.pos.y, tryX, tryY) && this.hasLos(tryX, tryY, target.x, target.y)) {
+                  destX = tryX;
+                  destY = tryY;
+                  flanked = true;
+                  break;
+                }
+              }
+              if (!flanked) {
+                destX = target.x;
+                destY = target.y;
+              }
+            }
+            this.step(m, st, destX, destY, spd, dt);
+            st.facing = faceToward(m.pos.x, m.pos.y, target.x, target.y);
+          }
+        } else {
+          // Unarmed brawler
+          if (dist <= loadout.attackRange) {
+            st.substate = 'strike';
+            if (nowMs - st.attackAt >= MELEE_COOLDOWN * 1000) {
+              st.attackAt = nowMs;
+              if ((target.spawnProtectedUntil ?? 0) <= nowMs) {
+                ev.push({
+                  kind: 'damage-player',
+                  targetId: target.id,
+                  amount: MELEE_DAMAGE,
+                  fromId: m.id,
+                });
+              }
+            }
+          } else {
+            this.step(m, st, target.x, target.y, loadout.chaseSpeed, dt);
+            st.substate = 'chase';
+            st.facing = faceToward(m.pos.x, m.pos.y, target.x, target.y);
+          }
+        }
         break;
       }
       case 'search': {
+        st.substate = 'search';
         const p = st.lastSeen;
         if (!p) break;
         if (isSpawnSafeZone(p.x, p.y)) break; // never sweep into the clear disc
         const d = Math.hypot(p.x - m.pos.x, p.y - m.pos.y);
         if (d > 0.8) {
-          this.step(m, st, p.x, p.y, SEARCH_SPEED, dt);
+          this.step(m, st, p.x, p.y, loadout.patrolSpeed * 1.3, dt);
         } else {
           st.facing += SEARCH_SPIN * dt; // sweep the gaze where it stood
         }
         break;
       }
       case 'idle':
+        st.substate = 'idle';
         // A fresh mob dwells before its first patrol step (FSM idle timer).
         st.stuck = 0;
         break;
       default: {
         // patrol: drift around home so the world is not full of statues.
+        st.substate = 'patrol';
         if (st.waypointPause > 0) {
           st.waypointPause -= dt;
           st.stuck = 0;
@@ -589,7 +726,7 @@ export class SpawnerAI {
         }
         const beforeX = m.pos.x;
         const beforeY = m.pos.y;
-        this.step(m, st, wp.x, wp.y, PATROL_SPEED, dt);
+        this.step(m, st, wp.x, wp.y, loadout.patrolSpeed, dt);
         st.stuck =
           Math.hypot(m.pos.x - beforeX, m.pos.y - beforeY) < 0.02 ? st.stuck + dt : 0;
         break;
@@ -640,6 +777,23 @@ export class SpawnerAI {
     this.spawner.moveMob(m.id, nx, ny);
     this.moved.push(m.id);
     this.stats.moved++;
+  }
+
+  /** Clear line-of-sight between two world coordinates (walls.json + tile grid). */
+  private hasLos(x0: number, y0: number, x1: number, y1: number): boolean {
+    if (this.walls.length > 0 && !rectLos(this.walls, x0, y0, x1, y1)) return false;
+    const size = this.chunkSize;
+    const cx0 = Math.floor(x0 / size);
+    const cy0 = Math.floor(y0 / size);
+    const cx1 = Math.floor(x1 / size);
+    const cy1 = Math.floor(y1 / size);
+    if (cx0 === cx1 && cy0 === cy1) {
+      const ox = cx0 * size;
+      const oy = cy0 * size;
+      const grid = this.chunkGrid(cx0, cy0);
+      return gridLos(grid, x0 - ox, y0 - oy, x1 - ox, y1 - oy, 1);
+    }
+    return true;
   }
 
   /** A wall rect or a solid tile on the segment (inclusive of both endpoints). */

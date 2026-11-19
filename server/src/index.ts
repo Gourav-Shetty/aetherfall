@@ -1,6 +1,18 @@
 // @aetherfall/server — authoritative 20Hz WS, snapshots 10Hz, interest-filtered.
 import { WebSocketServer, WebSocket } from 'ws';
-import { PROTOCOL_VERSION, TICK_HZ, type ClientMsg, type ServerMsg } from '@aetherfall/shared';
+import {
+  PROTOCOL_VERSION,
+  TICK_HZ,
+  KNOCKBACK_IMPULSE,
+  HIT_RECOIL_IMPULSE,
+  DASH_IMPULSE,
+  HITSTOP_DEFAULT_MS,
+  getWeaponProfile,
+  computeContactPoint,
+  PLAYER_RADIUS,
+  type ClientMsg,
+  type ServerMsg,
+} from '@aetherfall/shared';
 import { Sim } from './sim.js';
 import { InterestIndex, InterestTracker } from './interest.js';
 import { AntiCheat, safeParseClientMsg } from './anticheat.js';
@@ -51,6 +63,7 @@ import {
   clearMeleeCooldown,
   createGameState,
   ensurePlayer as ensureGamePlayer,
+  firstWeapon,
   playerMeleeAttack,
   removePlayer as removeGamePlayer,
   sanitizeChat,
@@ -866,28 +879,64 @@ wss.on('connection', (ws) => {
           kickPlayer(pid, ws, 'shadowban');
           return;
         }
-        sim.setVelocity(pid, checked.vx, checked.vy, m.input.seq);
-        if (m.input.attack) {
-          // AI-NPC: basic attack chips the nearest NPC/boss within 3u.
-          // SYSTEMS: the swing carries the aggregated stat block's damage
-          // (the legacy level curve + talents + equipped weapon) instead of the
-          // flat 12. Level 1 with no talents is identical, so TTK is unchanged.
-          npcs.damageFromPlayer(p.x, p.y, __systems.enabled ? __systems.meleeDamage(pid) : 12, p.id);
-          // MELEE: the same swing also reaches world (spawner) mobs. Both
-          // populations share one input frame; NPC ids and mob ids live in
-          // disjoint namespaces so they never contend for the same target.
-          // This is the call that makes onMobKilled fire: without it no world
-          // mob ever died, so no mob-die / xp-gain / pickup-spawn was sent and
-          // kill quests never advanced.
-          // `emitGameEvent` routes mob-die to everyone and the personal reward
-          // events (xp-gain / quest-* / levelup / pickup-spawn) to the killer.
-          // MASKS: the tithe scale adds bonus loot rolls; the gallow-beak
-          // widens the execution window. Both default to legacy behaviour.
-          const meleeOpts: { bonusRolls?: number; finishBonus?: number } = __systems.enabled
-            ? { bonusRolls: __systems.extraLootRolls(pid), finishBonus: __systems.finishBonus(pid) }
-            : {};
-          const plainSwing = (meleeOpts.bonusRolls ?? 0) === 0 && (meleeOpts.finishBonus ?? 0) === 0;
-          for (const e of playerMeleeAttack(__game, pid, nowMs, plainSwing ? {} : meleeOpts).events) emitGameEvent(e.kind, e.payload);
+        sim.setInput(pid, m.input.move.x, m.input.move.y, m.input.seq);
+        const queuedAction = sim.consumeCancelAction(pid, nowMs);
+        const wantsDash = m.input.dash || queuedAction === 'dash';
+        const wantsAttack = m.input.attack || queuedAction === 'attack';
+
+        if (m.input.jump) sim.applyJump(pid);
+        if (wantsDash) sim.applyDash(pid, m.input.move.x, m.input.move.y, DASH_IMPULSE, nowMs);
+        if (wantsAttack) {
+          if (sim.isHitStopped(pid, nowMs)) {
+            // Cancel window during hitstop: queue the attack to resolve when freeze ends (SF2 cancel)
+            sim.queueCancelAction(pid, 'attack', nowMs);
+          } else {
+            // Weapon-disambiguated reach & timing from existing catalog
+            const playerInv = __game.players.get(pid)?.inv;
+            const weaponId = (__systems.enabled ? __systems.equippedWeapon(pid) : null) ?? (playerInv ? firstWeapon(playerInv)?.itemId : null);
+            const weaponProfile = getWeaponProfile(weaponId);
+
+            const attackRange = weaponProfile.reach;
+            const npcHitDmg = npcs.damageFromPlayer(p.x, p.y, __systems.enabled ? __systems.meleeDamage(pid) : 12, p.id);
+            const meleeOpts: { range?: number; bonusRolls?: number; finishBonus?: number } = __systems.enabled
+              ? { range: attackRange, bonusRolls: __systems.extraLootRolls(pid), finishBonus: __systems.finishBonus(pid) }
+              : { range: attackRange };
+            const attackOutcome = playerMeleeAttack(__game, pid, nowMs, meleeOpts);
+            for (const e of attackOutcome.events) emitGameEvent(e.kind, e.payload);
+
+            const hitConnected = npcHitDmg > 0 || (attackOutcome.ok && (attackOutcome.dmg > 0 || attackOutcome.finished));
+            if (hitConnected) {
+              // 1. Hit dealt recoil impulse (the impact rule)
+              const inX = p.moveX ?? (p.vx !== 0 ? Math.sign(p.vx) : 1);
+              const inY = p.moveY ?? (p.vy !== 0 ? Math.sign(p.vy) : 0);
+              const inMag = Math.hypot(inX, inY) || 1;
+              sim.applyImpulse(pid, (-inX / inMag) * HIT_RECOIL_IMPULSE, (-inY / inMag) * HIT_RECOIL_IMPULSE);
+
+              // 2. Hitstop on every hit (~100ms), freezing both sims — not just kills
+              const hitstopDur = weaponProfile.hitstopMs;
+              sim.applyHitstop(pid, hitstopDur, nowMs);
+
+              // 3. Hitsparks at the true point of contact for every weapon
+              let targetPos = { x: p.x + (inX / inMag) * Math.min(attackRange, 1.5), y: p.y + (inY / inMag) * Math.min(attackRange, 1.5) };
+              if (attackOutcome.ok) {
+                const mob = __game.spawner.getMob(attackOutcome.mobId);
+                if (mob) targetPos = { x: mob.pos.x, y: mob.pos.y };
+              }
+              const contact = computeContactPoint({ x: p.x, y: p.y }, targetPos, 0.4);
+
+              // Broadcast hitstop & hitsparks
+              broadcast({
+                t: 'event',
+                kind: 'hit-stop',
+                payload: { durationMs: hitstopDur, attackerId: pid, targetId: attackOutcome.ok ? attackOutcome.mobId : undefined, x: contact.x, y: contact.y },
+              });
+              broadcast({
+                t: 'event',
+                kind: 'hit-spark',
+                payload: { x: contact.x, y: contact.y, nx: contact.nx, ny: contact.ny, weaponId: weaponProfile.id },
+              });
+            }
+          }
         }
         if (__systems.enabled && m.input.skill !== undefined) {
           // VOCATIONS: the sanitized `input.skill` slot fires the vocation
@@ -1219,6 +1268,20 @@ function tickOnce(): void {
         const p = sim.players.get(e.targetId);
         if (!p || p.hp <= 0) continue;
         if (!sim.damagePlayer(e.targetId, e.amount, Date.now())) continue;
+        sim.applyHitstop(p.id, HITSTOP_DEFAULT_MS, Date.now());
+        // Hit taken knockback impulse away from attacker (impact rule)
+        if (e.fromId) {
+          const m = npcs.debugMinion(e.fromId);
+          if (m) {
+            const dx = p.x - m.x;
+            const dy = p.y - m.y;
+            const len = Math.hypot(dx, dy) || 1;
+            sim.applyImpulse(p.id, (dx / len) * KNOCKBACK_IMPULSE, (dy / len) * KNOCKBACK_IMPULSE);
+            const contact = computeContactPoint({ x: m.x, y: m.y }, { x: p.x, y: p.y }, PLAYER_RADIUS);
+            broadcast({ t: 'event', kind: 'hit-stop', payload: { durationMs: HITSTOP_DEFAULT_MS, targetId: p.id, fromId: e.fromId, x: contact.x, y: contact.y } });
+            broadcast({ t: 'event', kind: 'hit-spark', payload: { x: contact.x, y: contact.y, nx: contact.nx, ny: contact.ny } });
+          }
+        }
         if (p.hp <= 0) {
           // No coordinates: respawnPlayer returns the player to the shared
           // shrine spawn anchor (a declared safe disc), same as a fresh join.
@@ -1247,6 +1310,18 @@ function tickOnce(): void {
       const p = sim.players.get(e.targetId);
       if (!p || p.hp <= 0) continue;
       if (!sim.damagePlayer(e.targetId, e.amount, Date.now())) continue;
+      sim.applyHitstop(p.id, HITSTOP_DEFAULT_MS, Date.now());
+      // Hit taken knockback impulse away from mob (impact rule)
+      const mob = __game.spawner.getMob(e.fromId);
+      if (mob) {
+        const dx = p.x - mob.pos.x;
+        const dy = p.y - mob.pos.y;
+        const len = Math.hypot(dx, dy) || 1;
+        sim.applyImpulse(p.id, (dx / len) * KNOCKBACK_IMPULSE, (dy / len) * KNOCKBACK_IMPULSE);
+        const contact = computeContactPoint({ x: mob.pos.x, y: mob.pos.y }, { x: p.x, y: p.y }, PLAYER_RADIUS);
+        broadcast({ t: 'event', kind: 'hit-stop', payload: { durationMs: HITSTOP_DEFAULT_MS, targetId: p.id, fromId: e.fromId, x: contact.x, y: contact.y } });
+        broadcast({ t: 'event', kind: 'hit-spark', payload: { x: contact.x, y: contact.y, nx: contact.nx, ny: contact.ny } });
+      }
       if (p.hp <= 0) {
         sim.respawnPlayer(p.id);
         broadcast({ t: 'event', kind: 'respawn', payload: { id: p.id } });

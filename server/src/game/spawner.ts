@@ -13,7 +13,7 @@ import {
   genChunk,
   getZone,
 } from '@aetherfall/engine';
-import { mulberry32 } from '@aetherfall/shared';
+import { getDefaultMobWeapon, mulberry32 } from '@aetherfall/shared';
 import { RESPAWN_DELAY_MS, makeMob, type Mob } from './combat.js';
 import {
   DOWNED_DURATION_MS,
@@ -111,13 +111,13 @@ export function spawnMobsForChunk(cx: number, cy: number, opts: SpawnOptions = {
     if (opts.mobLevel !== undefined) {
       // Explicit override (tests / scripted encounters): legacy name pool.
       const name = MOB_NAMES[Math.floor(rand() * MOB_NAMES.length)]!;
-      mobs.push(makeMob(base + i, wx, wy, name, Math.max(1, opts.mobLevel)));
+      mobs.push(makeMob(base + i, wx, wy, name, Math.max(1, opts.mobLevel), getDefaultMobWeapon(name)));
       continue;
     }
     // Zone table roll: name + level band, then zone-scaled HP (3-5-hit TTK).
     const zone = getZone(wx, wy, seed);
     const rolled = rollSpawnForZone(rand, zone);
-    const m = makeMob(base + i, wx, wy, rolled.name, rolled.level);
+    const m = makeMob(base + i, wx, wy, rolled.name, rolled.level, getDefaultMobWeapon(rolled.name));
     const zonedHp = mobMaxHp(zone, rolled.level);
     m.maxHp = zonedHp;
     m.hp = zonedHp;
