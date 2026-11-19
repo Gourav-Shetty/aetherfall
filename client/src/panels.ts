@@ -520,7 +520,7 @@ export class TalentPanel {
 // gated renders, `ownerDocument` element factory (headless-safe), escaped
 // server text. Nothing above is modified.
 
-import type { StaticChapterTracker } from './quests.js';
+import type { StaticChapterTracker, ChapterTwoTracker } from './quests.js';
 
 export const STATIC_PANEL_CSS = `
 /* ---------- STATIC chapter panels (phone booth / quest log / VHS cards) --- */
@@ -542,6 +542,15 @@ export const STATIC_PANEL_CSS = `
 .af-qrow .af-qlabel{color:#e8efff}
 .af-qrow .af-qdetail{color:#8fa3bf;font-size:10px}
 .af-archive{margin-top:6px;color:#8fa3bf;font-size:10px}
+/* Chapter Two block inside the quest log (additive; distinct class so the
+   STATIC .af-qrow count stays stable). */
+.af-c2head{margin-top:8px;padding-top:6px;border-top:1px solid rgba(77,195,255,.35);
+  font-size:10px;letter-spacing:2px;color:#4dc3ff}
+.af-c2row{padding:3px 0;border-bottom:1px solid rgba(58,69,87,.5)}
+.af-c2row:last-child{border-bottom:none}
+.af-c2row.done{opacity:.65}.af-c2row.done .af-qlabel{text-decoration:line-through}
+.af-c2row .af-qlabel{color:#e8efff}
+.af-c2row .af-qdetail{color:#8fa3bf;font-size:10px}
 .af-vhs{position:absolute;inset:0;z-index:30;display:none;align-items:center;justify-content:center;
   background:rgba(2,4,10,.72);pointer-events:auto}
 .af-vhs.open{display:flex}
@@ -652,8 +661,18 @@ export class QuestLogPanel {
   private archiveEl: HTMLElement;
   private head: HTMLElement;
   private lastRevision = -1;
+  private lastC2Revision = -1;
 
-  constructor(parent: HTMLElement, private tracker: StaticChapterTracker) {
+  /**
+   * `chapterTwo` is optional so existing two-argument callers (and the STATIC
+   * tests) keep working unchanged. When supplied, its progress is rendered as
+   * an extra block in this same panel — no new panel, no wire-format change.
+   */
+  constructor(
+    parent: HTMLElement,
+    private tracker: StaticChapterTracker,
+    private chapterTwo?: ChapterTwoTracker,
+  ) {
     injectStaticCss(parent);
     const root = makeStaticEl(parent, 'div', 'af-questlog');
     root.id = 'af-questlog';
@@ -673,14 +692,30 @@ export class QuestLogPanel {
     this.el = root;
   }
 
+  /**
+   * Feed a server `quest-progress` / `quest-complete` event for Chapter Two.
+   * Returns true when the tracker accepted it; the next render() repaints the
+   * block. Non-`partition-*` ids are ignored, so the wire format is unchanged.
+   */
+  handleChapterTwoEvent(kind: string, questId: string, count = 0, goal = 0): boolean {
+    if (!this.chapterTwo) return false;
+    return this.chapterTwo.applyEvent(kind, questId, count, goal);
+  }
+
   render(): boolean {
-    if (this.tracker.revision === this.lastRevision) return false;
+    const c2rev = this.chapterTwo?.revision ?? -1;
+    if (this.tracker.revision === this.lastRevision && c2rev === this.lastC2Revision) return false;
     this.lastRevision = this.tracker.revision;
+    this.lastC2Revision = c2rev;
     this.el.classList.add('open');
     const rows = this.tracker.toChecklist();
     const pct = Math.round(this.tracker.chapterProgress() * 100);
-    this.head.textContent = `Chapter STATIC · ${pct}%`;
-    this.list.innerHTML = rows
+    const c2pct = this.chapterTwo ? Math.round(this.chapterTwo.chapterProgress() * 100) : null;
+    this.head.textContent =
+      c2pct === null
+        ? `Chapter STATIC · ${pct}%`
+        : `Chapter STATIC · ${pct}%  /  PARTITION · ${c2pct}%`;
+    let html = rows
       .map((r) => {
         const cls = r.done ? 'af-qrow done' : 'af-qrow';
         return (
@@ -691,6 +726,22 @@ export class QuestLogPanel {
         );
       })
       .join('');
+    if (this.chapterTwo) {
+      html += `<div class="af-c2head">CHAPTER TWO — PARTITION</div>`;
+      html += this.chapterTwo
+        .toChecklist()
+        .map((r) => {
+          const cls = r.done ? 'af-c2row done' : 'af-c2row';
+          return (
+            `<div class="${cls}" data-mission="${esc(r.id)}">` +
+            `<div class="af-qlabel">${esc(r.label)}</div>` +
+            `<div class="af-qdetail">${esc(r.detail)}</div>` +
+            '</div>'
+          );
+        })
+        .join('');
+    }
+    this.list.innerHTML = html;
     const done = this.tracker.archive();
     this.archiveEl.textContent =
       done.length === 0 ? 'Archive: —' : `Archive: ${done.map((m) => m.name).join(', ')}`;

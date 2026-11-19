@@ -54,6 +54,7 @@
     "src/assets.ts",
     "src/assets.test.ts",
     "src/static.test.ts",
+    "src/chapter-two.test.ts",
     "src/combat_feel.test.ts",
     "src/feedback.ts",
     "src/floaters.ts",

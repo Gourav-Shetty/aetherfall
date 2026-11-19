@@ -379,3 +379,144 @@ export class StaticChapterTracker {
     this.revision++;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Chapter "PARTITION" — client view-model (ADDITIVE, wire format unchanged).
+// ---------------------------------------------------------------------------
+// Mirrors server/src/story/chapter-two.ts. Authoritative progress arrives as
+// the SAME `quest-progress` / `quest-complete` events the Maren chain and
+// STATIC use; this tracker only accepts `partition-*` ids, so neither of the
+// other tracks is disturbed. Nothing here changes the protocol or main.ts.
+
+export const PARTITION_CHAPTER_ID = 'partition';
+export const PARTITION_CHAPTER_TITLE = 'PARTITION';
+export const PARTITION_TITLE_REWARD = 'Warden of the Quiet';
+export const PARTITION_MASK_NAME = 'Ledger Lens';
+export const PARTITION_ENTITY_NAME = 'The Collator';
+
+export interface PartitionMissionView {
+  id: string;
+  seq: number;
+  name: string;
+  kind: 'kill' | 'collect' | 'explore';
+  goal: number;
+  briefing: string;
+  landmark: string;
+  returnHint: string;
+  count: number;
+  done: boolean;
+}
+
+const PARTITION_MISSIONS_VIEW: Array<Omit<PartitionMissionView, 'count' | 'done'>> = [
+  { id: 'partition-dead-air', seq: 1, name: 'Dead Air', kind: 'explore', goal: 3, briefing: 'Walk the dead booth line out of the Exchange and log 3 carriers.', landmark: 'Ashfall Exchange', returnHint: 'Follow the ledger, not the voices.' },
+  { id: 'partition-call-log', seq: 2, name: 'Call Log', kind: 'collect', goal: 5, briefing: 'Recover 5 shard-ledgers from the dead kiosk booths.', landmark: 'Flicker Kiosk Row', returnHint: 'Take the ledgers to the Meridian survey line.' },
+  { id: 'partition-glass-register', seq: 3, name: 'Glass Register', kind: 'kill', goal: 6, briefing: 'Clear 6 index-husks off the Meridian survey line.', landmark: 'Glass Meridian', returnHint: 'The husks came up through the drowned arcade.' },
+  { id: 'partition-sunken-archive', seq: 4, name: 'Sunken Archive', kind: 'explore', goal: 4, briefing: 'Stand at 4 submerged index pillars in the drowned arcade.', landmark: 'Sunken Arcade', returnHint: 'Return to the Exchange switchboard.' },
+  { id: 'partition-custody', seq: 5, name: 'Custody', kind: 'kill', goal: 8, briefing: 'Silence 8 collator-wards and take custody of the key.', landmark: 'Ashfall Exchange', returnHint: 'Stay at the switchboard. The ledger has something to tell you.' },
+];
+
+/**
+ * Chapter PARTITION tracker: checklist with live counts off the existing quest
+ * events. Ignores every non-`partition-*` id so Maren/STATIC traffic passes
+ * through untouched. No clock, no timers — progress is absolute and forward-only.
+ */
+export class ChapterTwoTracker {
+  missions: PartitionMissionView[] = PARTITION_MISSIONS_VIEW.map((m) => ({ ...m, count: 0, done: false }));
+  /** Bumped on every accepted event so panels skip redundant re-renders. */
+  revision = 0;
+
+  static isPartitionId(questId: string): boolean {
+    return questId.startsWith('partition-');
+  }
+
+  activeIndex(): number {
+    return this.missions.findIndex((m) => !m.done);
+  }
+
+  active(): PartitionMissionView | null {
+    const i = this.activeIndex();
+    return i < 0 ? null : this.missions[i]!;
+  }
+
+  isChapterDone(): boolean {
+    return this.missions.every((m) => m.done);
+  }
+
+  missionById(id: string): PartitionMissionView | undefined {
+    return this.missions.find((m) => m.id === id);
+  }
+
+  /** Authoritative `quest-progress` (absolute counts, forward-only). */
+  onQuestProgress(questId: string, count: number, goal: number): boolean {
+    const m = this.missionById(questId);
+    if (!m || m.done) return false;
+    if (!Number.isFinite(count) || !Number.isFinite(goal) || goal <= 0) return false;
+    const next = Math.max(0, Math.min(m.goal, Math.floor(count)));
+    if (next <= m.count) return false;
+    m.count = next;
+    this.revision++;
+    return true;
+  }
+
+  /** Authoritative `quest-complete` (pins count to goal, archives the mission). */
+  onQuestComplete(questId: string): PartitionMissionView | null {
+    const m = this.missionById(questId);
+    if (!m || m.done) return null;
+    m.done = true;
+    m.count = m.goal;
+    this.revision++;
+    return m;
+  }
+
+  /** Local kill fallback: only the ACTIVE kill mission, no double-count. */
+  onMobDie(killedByMe: boolean, serverCountForActive: number | null = null): boolean {
+    if (!killedByMe) return false;
+    const a = this.active();
+    if (!a || a.kind !== 'kill' || a.count >= a.goal) return false;
+    if (serverCountForActive !== null && serverCountForActive >= a.count) return false;
+    a.count = Math.min(a.goal, a.count + 1);
+    this.revision++;
+    return true;
+  }
+
+  /** Local explore fallback: only the ACTIVE explore mission. */
+  onExploreStep(): boolean {
+    const a = this.active();
+    if (!a || a.kind !== 'explore' || a.count >= a.goal) return false;
+    a.count = Math.min(a.goal, a.count + 1);
+    this.revision++;
+    return true;
+  }
+
+  archive(): PartitionMissionView[] {
+    return this.missions.filter((m) => m.done);
+  }
+
+  /** 0..1 across the five missions. */
+  chapterProgress(): number {
+    const goal = this.missions.reduce((x, m) => x + m.goal, 0);
+    if (goal <= 0) return 0;
+    const have = this.missions.reduce((x, m) => x + Math.min(m.count, m.goal), 0);
+    return Math.max(0, Math.min(1, have / goal));
+  }
+
+  /** Checklist rows for the quest-log panel (active marked ▶). */
+  toChecklist(): Array<{ id: string; label: string; detail: string; done: boolean; active: boolean }> {
+    const active = this.activeIndex();
+    return this.missions.map((m, i) => ({
+      id: m.id,
+      label: `${i === active ? '▶ ' : ''}${m.seq}. ${m.name} (${Math.min(m.count, m.goal)}/${m.goal})`,
+      detail: `${m.landmark} — ${m.briefing}`,
+      done: m.done,
+      active: i === active,
+    }));
+  }
+
+  /** Generic event entry-point: routes `quest-progress` / `quest-complete`. */
+  applyEvent(kind: string, questId: string, count = 0, goal = 0): boolean {
+    if (!ChapterTwoTracker.isPartitionId(questId)) return false;
+    if (kind === 'quest-progress') return this.onQuestProgress(questId, count, goal);
+    if (kind === 'quest-complete') return this.onQuestComplete(questId) !== null;
+    return false;
+  }
+}
