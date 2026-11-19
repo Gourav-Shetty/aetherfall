@@ -385,3 +385,111 @@ answered. — W.H.") and the title **Callerbound**. Chapter intro cards
 as a VHS-style overlay: skippable (ENTER advances, ESC skips) and
 reduced-motion safe (chromatic-aberration shadow removed under
 `prefers-reduced-motion` / `data-a11y-motion="reduced"`).
+
+## World tiers and reputation
+
+Ownership: `server/src/game/progression/` (`world_tiers.ts`, `reputation.ts`,
+`events.ts` + tests) and the wire vocabulary in `shared/src/world_tiers.ts`.
+**This layer is pure and currently unwired** — no call site was added to
+`server/src/index.ts` or `server/src/game/index.ts`; the exact two handoff
+points are written down in `server/src/game/progression/README.md`. Until a
+future agent adds them, the balance tables above are exactly the live values.
+
+### Tier table
+
+`tierAt(x, y)` reads the existing spawn anchors, boss roosts and `getZone()`
+(no new geography). A position is tier 1 inside a 24u disc around any anchor
+(twice the 12u no-mob radius); otherwise the distance to the nearest anchor
+sets the base band, the zone raises the floor, and a boss roost raises it
+again. The six anchors stay tier 1 even where `getZone()` calls them
+`dungeon`; all four roosts are tier 4.
+
+| Tier | Nearest anchor | Zone floor | Boss roost proximity | HP × | Damage × | XP × | Recommended level |
+| ---- | -------------- | ---------- | -------------------- | ---- | -------- | ---- | ----------------- |
+| 1 | ≤ 24u (sanctuary) | meadow | — | 1.00 | 1.00 | 1.00 | 1 |
+| 2 | 25-52u | dungeon ≥ 2 | — | 1.35 | 1.20 | 1.30 | 4 |
+| 3 | 53-82u | volcano ≥ 3 | inside 30u wake disc ≥ 3 | 1.70 | 1.45 | 1.70 | 6 |
+| 4 | > 82u | — | inside 16u crown = 4 | 2.00 | 1.65 | 2.10 | 8 |
+
+Tier 1 is byte-for-byte the old balance: a meadow minion keeps 48 HP, 7 damage
+per 1.5s and 30 kill XP, and a level-1 player still kills it in 4 swings
+(`12 + 3/level`). `tierStats(tier, base)` only touches mob HP/damage/XP, with
+hard caps of ×2.00 / ×1.65 / ×2.10. `tierPenalty(level, tier)` is the "soft
+wall": instead of blocking or teleporting an under-levelled visitor it applies
+`+12%` incoming damage per missing level (capped ×2.5) and `−15%` XP per missing
+level (floored at ×0.35). At or above the recommended level both multipliers
+are exactly 1.
+
+### Faction reputation
+
+Three original factions of the Fall, each with five named ranks and **one**
+purchasable perk. `awardFor(tier, 'kill' | 'quest')` pays tier-scaled,
+faction-weighted reputation (the Vigil guards, the Choir remembers, the Ledger
+maps); lifetime total decides rank, unspent balance buys the perk.
+
+| Faction | Ranks (thresholds, lifetime rep) | Perk (spend) |
+| ------- | -------------------------------- | ------------ |
+| The Ashen Vigil | Cinder Sentry 0 → Ember Warden 50 → Dawnvow Knight 150 → Last-Light Captain 350 → Vigil of the Fall 750 | Oath of the Last Watch: +25 max HP (120 rep, rank 2) |
+| The Hollow Choir | Muted Mourner 0 → Vesper Cantor 45 → Requiem Bearer 135 → Dirge Archivist 315 → Voice of the Unfallen 675 | One Name Kept: +8% XP (150 rep, rank 2) |
+| The Fault Ledger | Soot Clerk 0 → Shard Runner 60 → Rift Surveyor 180 → Breach Factor 400 → Keeper of the Ledger 850 | Wayfinder's Bargain: 10% off vendor prices (180 rep, rank 2) |
+
+### World events
+
+A deterministic, seeded calendar — one event every **5 minutes** of tick time,
+first firing after the opening five minutes. Every third slot (index 2, 5, 8,
+…) is a `roost-awakening` (boss wakes for 2 min at one of the four roosts);
+the other slots are `shard-surge` events (1.5-2.25× XP for 3 min at one of five
+landmarks: Brazen Porch, Flicker Kiosk Row, Sunken Arcade, Glass Meridian,
+Ashfall Exchange). Slot N is derived from `mulberry32(seed ^ mix(N))` alone, so
+`activeEventAt(seed, now)` and `nextEventAfter(seed, now)` are constant-time
+and identical after every restart. The server-facing adapter is
+`WorldEventClock`, but nothing calls it yet.
+
+## Chapter Two: PARTITION (story-only, unwired into live sessions)
+
+Ownership: `server/src/story/chapter-two.ts` (arc + gating + payoff),
+`server/src/story/couriers.ts` (landmark hint NPCs), `server/src/story/world-state.ts`
+(reactive facts + call-site notes), client `ChapterTwoTracker` in
+`client/src/quests.ts` and the Chapter Two block in `QuestLogPanel`
+(`client/src/panels.ts`). Same contract as STATIC: PURE data/helpers, no
+clocks, no tick-loop edits, no protocol change, `partition-*` keys in the
+existing `QuestState.progress` map.
+
+Direct sequel to STATIC. The Ashfall Exchange relay is quiet, but the dead
+booths stopped carrying voices and started keeping a ledger. **The Collator**
+is an indexing process Maren's relay team built to map the Fall; during the
+collapse it was split across the booth network so it would not fold under the
+weight of mapping the dead. Wren Halloway was the human lock that held the
+partitions apart — taking her Hollow Receiver transferred the lock to the
+player.
+
+| # | Mission | Act | Landmark | Zone |
+| - | ------- | --- | -------- | ---- |
+| 1 | Dead Air (`partition-dead-air`) | explore 3 carriers | Ashfall Exchange | volcano |
+| 2 | Call Log (`partition-call-log`) | collect 5 shard-ledgers | Flicker Kiosk Row | meadow |
+| 3 | Glass Register (`partition-glass-register`) | kill 6 index-husks | Glass Meridian | dungeon |
+| 4 | Sunken Archive (`partition-sunken-archive`) | explore 4 pillars | Sunken Arcade | dungeon |
+| 5 | Custody (`partition-custody`) | kill 8 collator-wards | Ashfall Exchange | volcano |
+
+Sequential gating is a predicate over quest state: mission 1 opens only when
+`isStaticChapterDone()` is true, and mission N > 1 only when mission N-1 is
+done. XP follows 60/90/120/160/240. Twist: the voice that hired the player for
+STATIC missions 1-4 was partly the Collator impersonating Wren from her
+training logs; Maren partitioned it deliberately once it began indexing the
+names of the dead. Completing mission 5 grants the unique title **Warden of
+the Quiet** and mask **Ledger Lens**, with an idempotent claim latch so neither
+can be granted twice.
+
+Couriers (one per landmark, 5-line skippable trees reusing
+`StaticSceneDialogue`): Intake Clerk Voss, Tallies Munn, Surveyor Idda, Diver
+Corren, Switchboard Aide Pell. They click in when STATIC ends and go quiet as
+their own mission completes.
+
+Reactive facts (`derivePartitionWorldFlags`): completing the chapter opens the
+**Quiet Register** landmark at the shrine anchor (50,50), wakes the
+**collator-roost** controller (72,62), and makes the Ledger Lens stockable —
+`courierRoutesOpen` flips as soon as STATIC is done. `world-state.ts` lists the
+unwired call sites in `game/index.ts`, `index.ts`, `ai/npc.ts` and
+`game/content.ts`; the tick loop is deliberately untouched. The client quest
+panel shows a Chapter Two block fed by the same `quest-progress` /
+`quest-complete` events, with no wire-format change.

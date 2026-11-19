@@ -3,6 +3,7 @@ export * from './catalog.js';
 export * from './physics.js';
 export * from './combat_specs.js';
 export * from './mob_ai_specs.js';
+export * from './world_tiers.js';
 export const PROTOCOL_VERSION = 1;
 export const TICK_HZ = 20;
 export const SNAPSHOT_HZ = 10;
