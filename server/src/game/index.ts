@@ -14,6 +14,10 @@ import {
   type MeleeResolution,
   type Mob,
 } from './combat.js';
+// WORLD TIERS: soft progression gate. Both paths are exact no-ops at tier 1.
+import { penalizedXp, tierAt, tierPenalty } from './progression/world_tiers.js';
+// CHAPTER TWO: authoritative quest progress gated on STATIC completion.
+import { partitionOnCollect, partitionOnExplore, partitionOnKill } from '../story/chapter-two.js';
 import {
   DOWNED_DURATION_MS,
   DOWNED_RECOVER_FRAC,
@@ -436,7 +440,11 @@ function creditKill(
   const mobId = mob.id;
   const finisher = opts.finisher === true;
   const zone = getZone(mob.pos.x, mob.pos.y, game.seed);
-  const { questEvents, xp, drops, pickups } = applyKillRewards(
+  // WORLD TIERS: a low-level player in a high tier earns less XP. Tier 1 is an
+  // exact no-op (multiplier 1), so meadow balance and the documented 30 XP per
+  // level-1 kill are untouched.
+  const tierPenaltyForKill = tierPenalty(player.quests.level, tierAt(mob.pos.x, mob.pos.y, game.seed));
+  const { questEvents, xp: rawXp, drops, pickups } = applyKillRewards(
     player.quests,
     mob.name,
     zone,
@@ -446,7 +454,8 @@ function creditKill(
     rand,
     opts.bonusRolls ?? 0,
   );
-  let totalXp = xp;
+  // The penalty applies to earned XP, not the finisher bonus.
+  let totalXp = penalizedXp(rawXp, tierPenaltyForKill);
   const bonusEvents: QuestEvent[] = finisher ? [...addXp(player.quests, FINISHER_BONUS_XP)] : [];
   if (finisher) totalXp += FINISHER_BONUS_XP;
   game.pickups.push(...pickups);
@@ -463,6 +472,10 @@ function creditKill(
   out.push({ kind: 'xp-gain', payload: { playerId, amount: totalXp, level: player.quests.level, xpLeft: player.quests.xp } });
   for (const e of questEvents) out.push(questEvent(game, playerId, e));
   for (const e of bonusEvents) out.push(questEvent(game, playerId, e));
+  // CHAPTER TWO: the PARTITION kill missions ride the same authoritative kill
+  // path. partitionOnKill is gated on STATIC completion, so it is a no-op for
+  // every player still on chapter one.
+  for (const e of partitionOnKill(player.quests, 1)) out.push(questEvent(game, playerId, e));
   for (const pk of pickups) {
     out.push({
       kind: 'pickup-spawn',
@@ -517,7 +530,10 @@ export function onBossKilled(
     rand,
     opts.bonusRolls ?? 0,
   );
-  let totalXp = xp;
+  // Boss roosts are tier 4; the same soft wall applies, and is a no-op for a
+  // correctly levelled player.
+  const bossTierPenalty = tierPenalty(player.quests.level, tierAt(x, y, game.seed));
+  let totalXp = penalizedXp(xp, bossTierPenalty);
   const bonusEvents: QuestEvent[] = finisher ? [...addXp(player.quests, FINISHER_BONUS_XP)] : [];
   if (finisher) totalXp += FINISHER_BONUS_XP;
   game.pickups.push(...pickups);
@@ -697,6 +713,9 @@ export function collectPickup(game: GameState, playerId: number, pickupId: numbe
   ];
   for (const e of onCollect(player.quests, pickup.count)) out.push(questEvent(game, playerId, e));
   for (const e of chainOnCollect(player.quests, pickup.count)) out.push(questEvent(game, playerId, e));
+  // CHAPTER TWO: the ledger-collection mission counts here, on the one
+  // authoritative pickup path, so it cannot double-count with a local fallback.
+  for (const e of partitionOnCollect(player.quests, pickup.count)) out.push(questEvent(game, playerId, e));
   // ONBOARDING: tutorial step 4 ("take what it dropped") + the Road's collect
   // step ride the ONE authoritative pickup path, so a pickup that moved from
   // the corpse to the bag always counts exactly once.
@@ -742,6 +761,8 @@ export function tickGameplay(game: GameState, now: number): GameEvent[] {
     const key = chunkKeyOf(p.x, p.y);
     const evts: QuestEvent[] = onExplore(p.quests, p.seenChunks, key);
     for (const e of evts) out.push(questEvent(game, p.id, e));
+    // CHAPTER TWO: exploration missions use the same seen-chunk ledger.
+    for (const e of partitionOnExplore(p.quests, p.seenChunks, key)) out.push(questEvent(game, p.id, e));
     // ONBOARDING: three cheap reads per player per tick — step 1's distance
     // predicate, the Road's explore step, and the drain that turns every
     // latched objective into quest-progress / quest-complete / levelup.

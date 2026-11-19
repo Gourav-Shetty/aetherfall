@@ -25,7 +25,7 @@
 // No clocks, no timers: every gate is a predicate over quest state.
 
 import { addXp, type QuestEvent, type QuestProgress, type QuestState } from '../game/quests.js';
-import { isStaticChapterDone } from './chapter.js';
+import { STATIC_MISSIONS } from './chapter.js';
 import type { ZoneId } from '@aetherfall/engine';
 
 export const PARTITION_CHAPTER_ID = 'partition';
@@ -132,7 +132,12 @@ export function partitionMissionBySeq(seq: number): PartitionMission | undefined
 
 /** True when STATIC is finished — the only cross-chapter gate. */
 export function isChapterTwoUnlocked(state: QuestState): boolean {
-  return isStaticChapterDone(state);
+  // Pure check: `isStaticChapterDone()` calls `ensureStaticProgress()`, which
+  // would seed `static-*` entries as a side effect. A gate must never mutate
+  // quest state — otherwise unrelated kill/collect hooks create chapter-one
+  // progress for players who have not started it. A missing entry is simply
+  // "not done", which is exactly what this predicate needs.
+  return STATIC_MISSIONS.every((m) => state.progress[m.id]?.done === true);
 }
 
 /**

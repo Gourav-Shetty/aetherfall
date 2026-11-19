@@ -79,6 +79,11 @@ import { NPCManager } from './ai/npc.js';
 // statue. Same tick cadence, same damage budget (MELEE_DAMAGE/MELEE_COOLDOWN
 // from ai/npc.ts), same `damage-player` -> `sim.damagePlayer` lane.
 import { SpawnerAI } from './game/spawner-ai.js';
+// WORLD TIERS: the soft wall's damage half and the seeded world-event clock.
+import { WorldEventClock } from './game/progression/events.js';
+import { penalizedDamage, tierAt, tierPenalty } from './game/progression/world_tiers.js';
+const worldEvents = new WorldEventClock(1337);
+let lastWorldEventId = '';
 import { QuestGiverDialogue } from './ai/dialogue.js';
 import { unifiedMobSnapshot } from './game/mobs.js';
 // SYSTEMS: composes the pure systems/* modules (progression,
@@ -1240,6 +1245,13 @@ function tickOnce(): void {
     // are personal, everything else is world-visible.
     emitGameEvent(e.kind, e.payload);
   }
+  // WORLD EVENTS: the seeded clock emits once on activation, not every 20Hz
+  // tick. The `activeEventAt` lookup is O(1) and holds no cursor state.
+  const activeEvent = worldEvents.activeAt(Date.now());
+  if (activeEvent && activeEvent.id !== lastWorldEventId) {
+    lastWorldEventId = activeEvent.id;
+    broadcast({ t: 'event', kind: 'world-event', payload: activeEvent });
+  }
   // SYSTEMS: the composed per-tick pipeline. Syncs party rows (HP/level/
   // position), expires invites + emote bubbles, and pushes throttled party
   // snapshots. Change-driven, so it is silent on almost every tick. It also
@@ -1267,7 +1279,13 @@ function tickOnce(): void {
       if (e.kind === 'damage-player') {
         const p = sim.players.get(e.targetId);
         if (!p || p.hp <= 0) continue;
-        if (!sim.damagePlayer(e.targetId, e.amount, Date.now())) continue;
+        // WORLD TIERS: under-levelled players take more damage in higher tiers.
+        const gp = __game.players.get(p.id);
+        const tiered = penalizedDamage(
+          e.amount,
+          tierPenalty(gp?.quests.level ?? 1, tierAt(p.x, p.y, 1337)),
+        );
+        if (!sim.damagePlayer(e.targetId, tiered, Date.now())) continue;
         sim.applyHitstop(p.id, HITSTOP_DEFAULT_MS, Date.now());
         // Hit taken knockback impulse away from attacker (impact rule)
         if (e.fromId) {
@@ -1309,7 +1327,13 @@ function tickOnce(): void {
     for (const e of mobAi.tick(0.1, views, Date.now())) {
       const p = sim.players.get(e.targetId);
       if (!p || p.hp <= 0) continue;
-      if (!sim.damagePlayer(e.targetId, e.amount, Date.now())) continue;
+      // WORLD TIERS: same soft wall on the spawner-mob damage lane.
+      const gp = __game.players.get(p.id);
+      const tiered = penalizedDamage(
+        e.amount,
+        tierPenalty(gp?.quests.level ?? 1, tierAt(p.x, p.y, 1337)),
+      );
+      if (!sim.damagePlayer(e.targetId, tiered, Date.now())) continue;
       sim.applyHitstop(p.id, HITSTOP_DEFAULT_MS, Date.now());
       // Hit taken knockback impulse away from mob (impact rule)
       const mob = __game.spawner.getMob(e.fromId);

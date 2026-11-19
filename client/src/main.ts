@@ -16,7 +16,7 @@ import { Sound } from './sound.js';
 import { SettingsStore, qualityCaps } from './settings.js';
 import { Joystick, blendMove } from './joystick.js';
 import { FOG_RADIUS, FogOfWar, fogChunkKey, installFogPersistence } from './fog.js';
-import { ChainTracker } from './quests.js';
+import { ChainTracker, StaticChapterTracker, ChapterTwoTracker } from './quests.js';
 import { spineLabel } from './onboarding.js';
 import { bossBars, relevantBossBars } from './bosses.js';
 // SYSTEMS-HOOK (systems integration): additive panels over the server's composed
@@ -24,7 +24,7 @@ import { bossBars, relevantBossBars } from './bosses.js';
 // replaced; see docs/SYSTEMS.md#Integration for the chat-command reference.
 import { SystemsView } from './social.js';
 import { VOCATION_COLORS, nametagFor } from './masks.js';
-import { EmoteBubbleLayer, PartyPanel, TalentPanel, VendorPanel, mountOnboardingUi } from './panels.js';
+import { EmoteBubbleLayer, PartyPanel, TalentPanel, VendorPanel, QuestLogPanel, mountOnboardingUi } from './panels.js';
 import { TerrainView, zVisual } from './terrain_view.js';
 import { AssetLoader, DEFAULT_ART } from './assets.js';
 // FEEDBACK: the combat feel layer. Pure rules live in feedback.ts (pooled
@@ -271,6 +271,12 @@ let xp = 0, xpNext = 100, level = 1;
 const levels = new Map<number, number>();
 // Elder Maren 5-quest chain (ward-spark -> heart-of-fall, see server content.ts).
 const chain = new ChainTracker();
+// CHAPTER UI: the STATIC and PARTITION quest logs were implemented and tested
+// but never mounted in the live client. Mount them here so both chapters are
+// actually visible; both route through the existing quest events, no new wire.
+const staticChapter = new StaticChapterTracker();
+const chapterTwo = new ChapterTwoTracker();
+const questLog = new QuestLogPanel(document.getElementById('hud')!, staticChapter, chapterTwo);
 hud.setQuests(chain.toHud());
 const fog = new FogOfWar();
 installFogPersistence(fog);
@@ -850,6 +856,11 @@ net.onSnapshot = () => {
         exploreSeen.add(key);
         // Skip the very first chunk (spawn) so the count means "new ground".
         if (exploreSeen.size > 1 && chain.onExploreStep()) hud.setQuests(chain.toHud());
+        if (exploreSeen.size > 1) {
+          staticChapter.onExploreStep();
+          chapterTwo.onExploreStep();
+          questLog.render();
+        }
       }
     }
   }
@@ -903,6 +914,9 @@ net.onSnapshot = () => {
           // `mob-die` is the authoritative kill source when the server sends
           // it; this is the fallback for the NPC minions that simply vanish.
           if (chain.onMobDie(true, null)) hud.setQuests(chain.toHud());
+          staticChapter.onMobDie(true);
+          chapterTwo.onMobDie(true);
+          questLog.render();
           if (!firstBlood) {
             firstBlood = true;
             sound.quest();
@@ -1038,6 +1052,9 @@ net.onEvent = (kind, payload) => {
       if (mine) {
         hud.addKill(`${nm} slain`, finisher ? '✖' : '☠');
         if (chain.onMobDie(true, null)) hud.setQuests(chain.toHud());
+        staticChapter.onMobDie(true);
+        chapterTwo.onMobDie(true);
+        questLog.render();
         if (!firstBlood) { firstBlood = true; sound.quest(); } else sound.kill();
       } else {
         hud.addKill(`${nm} has fallen`, finisher ? '✖' : '☠');
@@ -1108,6 +1125,13 @@ net.onEvent = (kind, payload) => {
         const q = chain.questById(qid);
         if (q) hud.announceQuest('progress', `${q.name} (${count}/${goal})`, q.briefing);
       }
+      // CHAPTERS: feed both chapter trackers and let the panel render when a
+      // revision moves. Non-chapter ids are ignored by both.
+      if (qid && count !== null && goal !== null) {
+        staticChapter.onQuestProgress(qid, count, goal);
+        questLog.handleChapterTwoEvent('quest-progress', qid, count, goal);
+        questLog.render();
+      }
       break;
     }
     case 'quest-complete': {
@@ -1128,6 +1152,10 @@ net.onEvent = (kind, payload) => {
         break;
       }
       const done = chain.onQuestComplete(qid);
+      // CHAPTERS: completions are authoritative and one-shot in both trackers.
+      staticChapter.onQuestComplete(qid);
+      questLog.handleChapterTwoEvent('quest-complete', qid);
+      questLog.render();
       hud.setQuests(chain.toHud());
       if (done) {
         hud.addKill(`✔ Quest complete: ${done.name}`);
