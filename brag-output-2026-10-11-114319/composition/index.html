@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=1920, height=1080">
+    <title>AETHERFALL — brag</title>
+    <script src="assets/js/gsap.min.js"></script>
+    <style>
+      html, body { margin: 0; width: 1920px; height: 1080px; overflow: hidden; background: #0b0e14; }
+      #root { position: relative; width: 100%; height: 100%; overflow: hidden;
+        background: #0b0e14; color: #e8eef7;
+        font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+      .clip { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
+      .gold { background: linear-gradient(90deg, #ffffff, #f5d98a 35%, #9ecbff 60%, #e8c66a);
+        -webkit-background-clip: text; background-clip: text; color: transparent; }
+      /* scene 1 */
+      #s1-inner { text-align: center; }
+      #s1-l1 { font-size: 84px; font-weight: 800; letter-spacing: 2px; margin: 0; }
+      #s1-l2 { font-size: 84px; font-weight: 800; letter-spacing: 2px; margin: 18px 0 0; color: #e8c66a; }
+      #s1-kick { font-size: 30px; letter-spacing: 6px; color: #8fa3bf; margin: 40px 0 0; }
+      /* scene 2 */
+      #s2-inner { text-align: center; width: 1700px; }
+      #s2-title { font-size: 170px; font-weight: 900; letter-spacing: 14px; margin: 0; }
+      #s2-tag { font-size: 40px; color: #8fa3bf; margin: 10px 0 0; }
+      #s2-shot { margin-top: 34px; border: 2px solid rgba(232,198,106,.45); border-radius: 14px;
+        overflow: hidden; width: 1100px; margin-left: auto; margin-right: auto;
+        box-shadow: 0 18px 60px rgba(0,0,0,.6); }
+      #s2-shot img { display: block; width: 100%; height: auto; }
+      #s2-glow { position: absolute; left: 50%; top: 30%; width: 900px; height: 300px;
+        background: radial-gradient(ellipse at center, rgba(232,198,106,.16), transparent 70%);
+        pointer-events: none; }
+      /* scene 3 */
+      #s3-inner { width: 1700px; display: flex; gap: 60px; align-items: center; }
+      #s3-shot { flex: 1.25; border: 2px solid rgba(255,82,82,.5); border-radius: 14px; overflow: hidden;
+        box-shadow: 0 18px 60px rgba(0,0,0,.6); }
+      #s3-shot img { display: block; width: 100%; height: auto; }
+      #s3-copy { flex: 1; }
+      #s3-c1 { font-size: 56px; font-weight: 800; margin: 0; }
+      #s3-c1 b { color: #ff8080; }
+      #s3-c2 { font-size: 44px; color: #8fa3bf; margin: 22px 0 0; }
+      #s3-feed { margin-top: 30px; display: inline-block; font-size: 38px; color: #e8eef7;
+        background: rgba(13,19,38,.85); border: 1px solid rgba(232,198,106,.4);
+        border-radius: 10px; padding: 12px 26px; }
+      #s3-feed b { color: #e8c66a; }
+      /* scene 4 */
+      #s4-inner { text-align: center; width: 1750px; }
+      #s4-head { font-size: 44px; letter-spacing: 8px; color: #8fa3bf; margin: 0 0 44px; }
+      #s4-cards { display: flex; gap: 40px; justify-content: center; }
+      .stat { width: 500px; background: linear-gradient(180deg, #0d1326, #10151f);
+        border: 1px solid rgba(232,198,106,.4); border-radius: 16px; padding: 40px 20px;
+        box-shadow: 0 18px 60px rgba(0,0,0,.55); }
+      .stat b { display: block; font-size: 96px; letter-spacing: 1px; color: #59d98c; line-height: 1; }
+      .stat.w b { color: #4dc3ff; }
+      .stat.g b { color: #ffe066; }
+      .stat span { display: block; font-size: 32px; color: #8fa3bf; margin-top: 18px; line-height: 1.35; }
+      /* scene 5 */
+      #s5-inner { width: 1700px; display: flex; gap: 60px; align-items: center; }
+      #s5-shot { flex: 1; border: 2px solid rgba(77,195,255,.4); border-radius: 14px; overflow: hidden;
+        box-shadow: 0 18px 60px rgba(0,0,0,.6); }
+      #s5-shot img { display: block; width: 100%; height: auto; }
+      #s5-copy { flex: 1.1; }
+      #s5-enter { font-size: 92px; font-weight: 900; letter-spacing: 6px; margin: 0; }
+      #s5-url { font-size: 44px; color: #4dc3ff; margin: 20px 0 0; }
+      #s5-mit { font-size: 38px; color: #8fa3bf; margin: 18px 0 0; }
+    </style>
+  </head>
+  <body>
+    <div data-hf-id="hf-at0g" id="root" data-composition-id="main" data-start="0" data-width="1920" data-height="1080" data-duration="20">
+      <audio data-hf-id="hf-pq7j" id="music" src="assets/music/happy-beats-business-moves-vol-9-by-ende-dot-app.mp3" data-start="0" data-duration="20" data-volume="0.5" data-fade-out="1.5"></audio>
+      <audio data-hf-id="hf-sjg8" id="sfx-hook" src="assets/sfx/bong_001.ogg" data-start="1.4" data-volume="0.6"></audio>
+      <audio data-hf-id="hf-as8t" id="sfx-slam" src="assets/sfx/impactSoft_medium_001.ogg" data-start="3.7" data-volume="0.8"></audio>
+      <audio data-hf-id="hf-u6sk" id="sfx-feed" src="assets/sfx/impactSoft_medium_002.ogg" data-start="9.6" data-volume="0.6"></audio>
+      <audio data-hf-id="hf-wjpz" id="sfx-card1" src="assets/sfx/card-slide-1.ogg" data-start="11.06" data-volume="0.55"></audio>
+      <audio data-hf-id="hf-0608" id="sfx-card2" src="assets/sfx/card-slide-1.ogg" data-start="11.6" data-volume="0.55"></audio>
+      <audio data-hf-id="hf-cwf1" id="sfx-card3" src="assets/sfx/card-slide-1.ogg" data-start="12.65" data-volume="0.55"></audio>
+      <audio data-hf-id="hf-fiuk" id="sfx-outro" src="assets/sfx/impactBell_heavy_000.ogg" data-start="16.2" data-volume="0.6"></audio>
+
+      <section data-hf-id="hf-lps7" id="s1" class="clip" data-start="0" data-duration="3.2" data-track-index="0">
+        <div data-hf-id="hf-kfwi" id="s1-inner">
+          <p data-hf-id="hf-regv" id="s1-l1">No engine.</p>
+          <p data-hf-id="hf-i21x" id="s1-l2">No networking library.</p>
+          <p data-hf-id="hf-u166" id="s1-kick">A BROWSER MMO · BUILT FROM SCRATCH</p>
+        </div>
+      </section>
+
+      <section data-hf-id="hf-way7" id="s2" class="clip" data-start="3.2" data-duration="3.8" data-track-index="0">
+        <div data-hf-id="hf-uawc" id="s2-glow"></div>
+        <div data-hf-id="hf-7thp" id="s2-inner">
+          <p data-hf-id="hf-aj9t" id="s2-title" class="gold">AETHERFALL</p>
+          <p data-hf-id="hf-z22y" id="s2-tag">Just sockets, math, and pixels.</p>
+          <div data-hf-id="hf-vvvb" id="s2-shot"><img data-hf-id="hf-fccc" src="assets/img/map-isometric-shrine.svg" alt="Isometric shrine gameplay"></div>
+        </div>
+      </section>
+
+      <section data-hf-id="hf-h9zb" id="s3" class="clip" data-start="7.0" data-duration="4.0" data-track-index="0">
+        <div data-hf-id="hf-fly8" id="s3-inner">
+          <div data-hf-id="hf-dk3k" id="s3-shot"><img data-hf-id="hf-nmzp" src="assets/img/combat-night-raid.svg" alt="Night boss raid"></div>
+          <div data-hf-id="hf-vz5z" id="s3-copy">
+            <p data-hf-id="hf-gdf0" id="s3-c1"><b data-hf-id="hf-uto6">4 bosses.</b> Server-sent telegraphs.</p>
+            <p data-hf-id="hf-9ebw" id="s3-c2">hit-stop · damage numbers · finishers</p>
+            <div data-hf-id="hf-5qib" id="s3-feed">☠ gloomfang slain <b data-hf-id="hf-hs3t">✖</b></div>
+          </div>
+        </div>
+      </section>
+
+      <section data-hf-id="hf-bet8" id="s4" class="clip" data-start="11.0" data-duration="4.5" data-track-index="0">
+        <div data-hf-id="hf-laib" id="s4-inner">
+          <p data-hf-id="hf-nctz" id="s4-head">MEASURED, NOT ESTIMATED</p>
+          <div data-hf-id="hf-lywq" id="s4-cards">
+            <div data-hf-id="hf-bmmj" class="stat" id="s4-a"><b data-hf-id="hf-0onz">20 Hz</b><span data-hf-id="hf-1kjf">authoritative server</span></div>
+            <div data-hf-id="hf-fi1n" class="stat w" id="s4-b"><b data-hf-id="hf-rhqo">−93%</b><span data-hf-id="hf-y479">snapshot bytes, binary v2</span></div>
+            <div data-hf-id="hf-epve" class="stat g" id="s4-c"><b data-hf-id="hf-bfks">300/300</b><span data-hf-id="hf-yxb8">bot soak · 0 errors</span></div>
+          </div>
+        </div>
+      </section>
+
+      <section data-hf-id="hf-m17q" id="s5" class="clip" data-start="15.5" data-duration="4.5" data-track-index="0">
+        <div data-hf-id="hf-o2um" id="s5-inner">
+          <div data-hf-id="hf-kpw6" id="s5-shot"><img data-hf-id="hf-njq6" src="assets/img/editor-boss-arena.svg" alt="Level editor"></div>
+          <div data-hf-id="hf-p8np" id="s5-copy">
+            <p data-hf-id="hf-i8bg" id="s5-enter" class="gold">ENTER THE FALL</p>
+            <p data-hf-id="hf-mypo" id="s5-url">github.com/Gourav-Shetty/aetherfall</p>
+            <p data-hf-id="hf-thli" id="s5-mit">Runs in your browser · MIT</p>
+          </div>
+        </div>
+      </section>
+    </div>
+    <script>
+      const tl = gsap.timeline({ paused: true });
+      // Scene 1 — cold open
+      tl.fromTo("#s1-l1", { opacity: 0, y: 40 }, { opacity: 1, y: 0, duration: 0.4, ease: "power3.out" }, 0.3);
+      tl.fromTo("#s1-l2", { opacity: 0, y: 40 }, { opacity: 1, y: 0, duration: 0.4, ease: "power3.out" }, 1.4);
+      tl.fromTo("#s1-kick", { opacity: 0 }, { opacity: 1, duration: 0.5 }, 2.2);
+      // Scene 2 — title slam, beat-locked ~3.70s
+      tl.fromTo("#s2-title", { opacity: 0, scale: 2.2 }, { opacity: 1, scale: 1, duration: 0.5, ease: "power4.in" }, 3.7);
+      tl.fromTo("#s2-tag", { opacity: 0, y: 30 }, { opacity: 1, y: 0, duration: 0.45, ease: "power3.out" }, 4.3);
+      tl.fromTo("#s2-shot", { opacity: 0, y: 60 }, { opacity: 1, y: 0, duration: 0.55, ease: "power3.out" }, 4.6);
+      tl.fromTo("#s2-glow", { opacity: 0 }, { opacity: 1, duration: 1.2 }, 3.7);
+      // Scene 3 — combat
+      tl.fromTo("#s3-shot", { opacity: 0, scale: 1.08 }, { opacity: 1, scale: 1, duration: 0.6, ease: "power2.out" }, 7.0);
+      tl.fromTo("#s3-c1", { opacity: 0, x: 60 }, { opacity: 1, x: 0, duration: 0.45, ease: "power3.out" }, 7.8);
+      tl.fromTo("#s3-c2", { opacity: 0, x: 60 }, { opacity: 1, x: 0, duration: 0.45, ease: "power3.out" }, 8.8);
+      tl.fromTo("#s3-feed", { opacity: 0, y: 24 }, { opacity: 1, y: 0, duration: 0.35, ease: "power3.out" }, 9.6);
+      // Scene 4 — stat cards on beat grid
+      tl.fromTo("#s4-head", { opacity: 0 }, { opacity: 1, duration: 0.4 }, 10.9);
+      tl.fromTo("#s4-a", { opacity: 0, y: 50 }, { opacity: 1, y: 0, duration: 0.35, ease: "back.out(1.4)" }, 11.06);
+      tl.fromTo("#s4-b", { opacity: 0, y: 50 }, { opacity: 1, y: 0, duration: 0.35, ease: "back.out(1.4)" }, 11.6);
+      tl.fromTo("#s4-c", { opacity: 0, y: 50 }, { opacity: 1, y: 0, duration: 0.35, ease: "back.out(1.4)" }, 12.65);
+      // Scene 5 — outro
+      tl.fromTo("#s5-shot", { opacity: 0, x: -60 }, { opacity: 1, x: 0, duration: 0.55, ease: "power3.out" }, 15.5);
+      tl.fromTo("#s5-enter", { opacity: 0, y: 40 }, { opacity: 1, y: 0, duration: 0.5, ease: "power3.out" }, 16.2);
+      tl.fromTo("#s5-url", { opacity: 0 }, { opacity: 1, duration: 0.45 }, 17.0);
+      tl.fromTo("#s5-mit", { opacity: 0 }, { opacity: 1, duration: 0.45 }, 17.6);
+      window.__timelines["main"] = tl;
+    </script>
+  </body>
+</html>

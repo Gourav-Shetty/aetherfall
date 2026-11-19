@@ -1,0 +1,1 @@
+AETHERFALL: a browser MMO engine built from scratch — 20Hz authoritative server, binary protocol at −93% bytes, 300-bot soak with 0 errors. Just sockets, math, and pixels.
