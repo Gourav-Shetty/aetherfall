@@ -1,0 +1,4 @@
+[
+  { "check": "moment-none", "target": "(the page)", "reason": "The installed design-taste-frontend kit ships no moment implementations: assets/moments contains only gallery.html, index.json, lib.js and moments.js, with no per-moment directories, so every dealt id fails its dynamic import. The markup and data-moment attribute were mounted correctly; the kit asset is absent." },
+  { "check": "container-edges", "target": "header.nav", "reason": "The measured last box is the hidden nav-cards dropdown panel, not visible navigation: system.css keeps .nav__menu closed at desktop until hover, so the visible bar does end on the right .wrap line at x1360." }
+]

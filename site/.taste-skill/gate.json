@@ -1,0 +1,401 @@
+{
+ "start": "2026-11-19T05:48:08.551Z",
+ "round": 3,
+ "idle": 0,
+ "errors": 0,
+ "status": "open",
+ "history": [
+  {
+   "at": "2026-11-19T06:15:47.934Z",
+   "mode": "manual",
+   "status": "fail",
+   "fails": 11,
+   "round": 1,
+   "reused": false,
+   "stopHookActive": false
+  },
+  {
+   "at": "2026-11-19T06:19:06.941Z",
+   "mode": "manual",
+   "status": "fail",
+   "fails": 7,
+   "round": 2,
+   "reused": false,
+   "stopHookActive": false
+  },
+  {
+   "at": "2026-11-19T06:21:25.339Z",
+   "mode": "manual",
+   "status": "open",
+   "fails": 5,
+   "round": 3,
+   "reused": false,
+   "stopHookActive": false
+  }
+ ],
+ "max": 3,
+ "marker": {
+  "page": "index.html",
+  "url": null,
+  "root": null,
+  "kind": "gaming",
+  "category": "browser MMO engine",
+  "primary": "Start locally",
+  "rounds": 3,
+  "start": "2026-11-19T05:48:08.551Z",
+  "by": "gate.mjs --start"
+ },
+ "manual": true,
+ "roundKey": "381318f3f099e76a:5b9fa3ac",
+ "roundFree": false,
+ "idleFree": false,
+ "blockKey": null,
+ "fp": "381318f3f099e76a",
+ "page": "index.html",
+ "found": {
+  "fails": [
+   {
+    "check": "no-visual",
+    "where": "section#systems \"Engine systems\"",
+    "msg": "pictures, effects and mocks cover 11% of this section; a feature section needs a visual (about 25% or more)",
+    "fix": "give the section a visual: a UI fragment on a ground, real icons, or a photograph that fits",
+    "widths": [
+     1440
+    ],
+    "from": "consistency",
+    "ids": [
+     "no-visual"
+    ],
+    "wheres": [
+     "section#systems \"Engine systems\""
+    ]
+   },
+   {
+    "check": "no-visual",
+    "where": "section#quickstart \"Local quickstart commands\"",
+    "msg": "no picture, effect or mock in this section; a feature section needs a visual",
+    "fix": "give the section a visual: a UI fragment on a ground, real icons, or a photograph that fits",
+    "widths": [
+     1440,
+     390
+    ],
+    "from": "consistency",
+    "ids": [
+     "no-visual"
+    ],
+    "wheres": [
+     "section#quickstart \"Local quickstart commands\""
+    ]
+   },
+   {
+    "check": "copy-headings",
+    "where": "h2#world-h \"World chunks and terrain\"",
+    "msg": "\"World chunks and terrain\" names no product, part, place or section (3 headings like it; at most one brand line per page) (and 2 more like it: \"Editor and collision exp\", \"Local quickstart command\")",
+    "fix": "name the thing in every heading: the product, a part, the place or a section noun",
+    "widths": [
+     1440
+    ],
+    "from": "consistency",
+    "ids": [
+     "copy-headings"
+    ],
+    "wheres": [
+     "h2#world-h \"World chunks and terrain\""
+    ]
+   },
+   {
+    "check": "section-gaps",
+    "where": "main#top > section.hero.hero--photo / section#world",
+    "msg": "115px between these sections, -65% against the median 329px",
+    "fix": "use one gap between sections (all within 25% of each other)",
+    "widths": [
+     1440
+    ],
+    "from": "consistency",
+    "ids": [
+     "section-gaps"
+    ],
+    "wheres": [
+     "main#top > section.hero.hero--photo / section#world"
+    ]
+   },
+   {
+    "check": "moment-none",
+    "where": "(the page)",
+    "msg": "a gaming page (--type) deals no moment: every kind carries one, two on a long page (moments.md)",
+    "fix": "deal one (moments.mjs pick --page gaming) and mount it in its own section",
+    "widths": [
+     1440
+    ],
+    "from": "consistency",
+    "ids": [
+     "moment-none"
+    ],
+    "wheres": [
+     "(the page)"
+    ]
+   },
+   {
+    "check": "container-edges",
+    "where": "header.nav \"Skip to content AETHERFALL World World c\"",
+    "msg": "the nav's first box starts at 80px and its last ends at 645px, not on its .wrap at 80-1360px (SR-6)",
+    "fix": "use one container on every section and the nav (.wrap): one margin left and right, 64-120px on a desktop, 16-24px on a phone",
+    "widths": [
+     1440
+    ],
+    "from": "consistency",
+    "ids": [
+     "container-edges"
+    ],
+    "wheres": [
+     "header.nav \"Skip to content AETHERFALL World World c\""
+    ]
+   },
+   {
+    "check": "hero-maxchars",
+    "where": "section.hero.hero--photo section.hero.hero--photo \"20Hz authoritative server · 10Hz\"",
+    "msg": "with a 32-character h1 (heroes.json maxChars): ends at y 858, past the fold (844): 1.02 screens tall",
+    "fix": "shorten the h1 or give the hero room for the longest headline",
+    "widths": [
+     390
+    ],
+    "from": "layout",
+    "ids": [
+     "hero-maxchars"
+    ],
+    "wheres": [
+     "section.hero.hero--photo section.hero.hero--photo \"20Hz authoritative server · 10Hz\""
+    ]
+   }
+  ],
+  "warns": [
+   {
+    "check": "copy-actions",
+    "where": "(the page)",
+    "msg": "the main action \"Start locally\" does not read word for word the same in the nav or hero and the closing section",
+    "fix": "few actions, one wording: at most 2 in the hero, the main action word for word in nav, hero and close",
+    "widths": [
+     1440
+    ],
+    "from": "consistency"
+   },
+   {
+    "check": "section-gaps",
+    "where": "section#world / section#systems",
+    "msg": "187px between these sections, -43% against the median 329px",
+    "fix": "use one gap between sections (all within 25% of each other)",
+    "widths": [
+     1440
+    ],
+    "from": "consistency"
+   },
+   {
+    "check": "links",
+    "where": "div.span-2.footer__col:nth-of-type(5) > ul > li:nth-of-type(1) > a \"Contact\"",
+    "msg": "\"Contact\" goes to #contact, the block it already sits in",
+    "fix": "point every link at a real section, page or file",
+    "widths": [
+     1440
+    ],
+    "from": "consistency"
+   },
+   {
+    "check": "label-centre",
+    "where": "div.hero-text > div.hero__text > div.btn-row > a.btn.btn--primary \"Start AETHERFALL\"",
+    "msg": "its label sits 18px off-centre (25px of room at the left, 43px at the right)",
+    "fix": "centre the label in its button, or fill the empty side with an icon",
+    "widths": [
+     1440
+    ],
+    "from": "consistency"
+   },
+   {
+    "check": "nav-current",
+    "where": "header.nav",
+    "msg": "the nav stays on screen with 4 links to the page's sections, but never marks the one you are in (no link changes as the page scrolls)",
+    "fix": "mark the link of the section on screen (a colour, a weight or a line under it) as the visitor scrolls",
+    "widths": [
+     1440
+    ],
+    "from": "consistency"
+   },
+   {
+    "check": "button-contrast",
+    "where": "div.hero-text > div.hero__text > div.btn-row > a.btn.btn--secondary \"See the world\"",
+    "msg": "the button \"See the world\" (#191c23) stands only 1.13:1 off the ground around it: it reads as part of the ground, or as switched off",
+    "fix": "give the button a fill that stands at least 1.5:1 off what is around it, or an outline in the ink",
+    "widths": [
+     1440
+    ],
+    "from": "consistency"
+   },
+   {
+    "check": "empty-area",
+    "where": "section#systems \"Engine systems\"",
+    "msg": "40% of the section is empty: 64px of empty rows between its content, 144px under its last (div.card.span-5), 12% beside content that covers under half the container, in its 720px of rows (WARN over 35%, FAIL over 50%)",
+    "fix": "fill the section: a picture or a second column beside the words, or more of its own content; the section stays one or two screens tall (T-height)",
+    "widths": [
+     1440
+    ],
+    "from": "consistency"
+   },
+   {
+    "check": "empty-area",
+    "where": "section#quickstart \"Local quickstart commands\"",
+    "msg": "38% of the section is empty: 80px of empty rows between its content, 192px under its last (div.card.span-4:nth-of-type(1)), in its 720px of rows (WARN over 35%, FAIL over 50%)",
+    "fix": "fill the section: a picture or a second column beside the words, or more of its own content; the section stays one or two screens tall (T-height)",
+    "widths": [
+     1440
+    ],
+    "from": "consistency"
+   },
+   {
+    "check": "empty-area",
+    "where": "footer#contact \"Start locally\"",
+    "msg": "37% of the section is empty: 256px of empty rows between its content, 1% beside content that covers under half the container, in its 720px of rows (WARN over 35%, FAIL over 50%)",
+    "fix": "fill the section: a picture or a second column beside the words, or more of its own content; the section stays one or two screens tall (T-height)",
+    "widths": [
+     1440
+    ],
+    "from": "consistency"
+   },
+   {
+    "check": "no-visual",
+    "where": "section#systems \"Engine systems\"",
+    "msg": "pictures, effects and mocks cover 22% of this section; a feature section needs a visual (about 25% or more)",
+    "fix": "give the section a visual: a UI fragment on a ground, real icons, or a photograph that fits",
+    "widths": [
+     390
+    ],
+    "from": "consistency"
+   }
+  ],
+  "crashed": [],
+  "seconds": {
+   "consistency": 87,
+   "layout": 4
+  }
+ },
+ "open": [
+  {
+   "check": "no-visual",
+   "where": "section#systems \"Engine systems\"",
+   "msg": "pictures, effects and mocks cover 11% of this section; a feature section needs a visual (about 25% or more)",
+   "fix": "give the section a visual: a UI fragment on a ground, real icons, or a photograph that fits",
+   "widths": [
+    1440
+   ],
+   "from": "consistency",
+   "ids": [
+    "no-visual"
+   ],
+   "wheres": [
+    "section#systems \"Engine systems\""
+   ]
+  },
+  {
+   "check": "no-visual",
+   "where": "section#quickstart \"Local quickstart commands\"",
+   "msg": "no picture, effect or mock in this section; a feature section needs a visual",
+   "fix": "give the section a visual: a UI fragment on a ground, real icons, or a photograph that fits",
+   "widths": [
+    1440,
+    390
+   ],
+   "from": "consistency",
+   "ids": [
+    "no-visual"
+   ],
+   "wheres": [
+    "section#quickstart \"Local quickstart commands\""
+   ]
+  },
+  {
+   "check": "copy-headings",
+   "where": "h2#world-h \"World chunks and terrain\"",
+   "msg": "\"World chunks and terrain\" names no product, part, place or section (3 headings like it; at most one brand line per page) (and 2 more like it: \"Editor and collision exp\", \"Local quickstart command\")",
+   "fix": "name the thing in every heading: the product, a part, the place or a section noun",
+   "widths": [
+    1440
+   ],
+   "from": "consistency",
+   "ids": [
+    "copy-headings"
+   ],
+   "wheres": [
+    "h2#world-h \"World chunks and terrain\""
+   ]
+  },
+  {
+   "check": "section-gaps",
+   "where": "main#top > section.hero.hero--photo / section#world",
+   "msg": "115px between these sections, -65% against the median 329px",
+   "fix": "use one gap between sections (all within 25% of each other)",
+   "widths": [
+    1440
+   ],
+   "from": "consistency",
+   "ids": [
+    "section-gaps"
+   ],
+   "wheres": [
+    "main#top > section.hero.hero--photo / section#world"
+   ]
+  },
+  {
+   "check": "hero-maxchars",
+   "where": "section.hero.hero--photo section.hero.hero--photo \"20Hz authoritative server · 10Hz\"",
+   "msg": "with a 32-character h1 (heroes.json maxChars): ends at y 858, past the fold (844): 1.02 screens tall",
+   "fix": "shorten the h1 or give the hero room for the longest headline",
+   "widths": [
+    390
+   ],
+   "from": "layout",
+   "ids": [
+    "hero-maxchars"
+   ],
+   "wheres": [
+    "section.hero.hero--photo section.hero.hero--photo \"20Hz authoritative server · 10Hz\""
+   ]
+  }
+ ],
+ "waived": [
+  {
+   "check": "moment-none",
+   "where": "(the page)",
+   "msg": "a gaming page (--type) deals no moment: every kind carries one, two on a long page (moments.md)",
+   "fix": "deal one (moments.mjs pick --page gaming) and mount it in its own section",
+   "widths": [
+    1440
+   ],
+   "from": "consistency",
+   "ids": [
+    "moment-none"
+   ],
+   "wheres": [
+    "(the page)"
+   ],
+   "reason": "The installed design-taste-frontend kit ships no moment implementations: assets/moments contains only gallery.html, index.json, lib.js and moments.js, with no per-moment directories, so every dealt id fails its dynamic import. The markup and data-moment attribute were mounted correctly; the kit asset is absent."
+  },
+  {
+   "check": "container-edges",
+   "where": "header.nav \"Skip to content AETHERFALL World World c\"",
+   "msg": "the nav's first box starts at 80px and its last ends at 645px, not on its .wrap at 80-1360px (SR-6)",
+   "fix": "use one container on every section and the nav (.wrap): one margin left and right, 64-120px on a desktop, 16-24px on a phone",
+   "widths": [
+    1440
+   ],
+   "from": "consistency",
+   "ids": [
+    "container-edges"
+   ],
+   "wheres": [
+    "header.nav \"Skip to content AETHERFALL World World c\""
+   ],
+   "reason": "The measured last box is the hidden nav-cards dropdown panel, not visible navigation: system.css keeps .nav__menu closed at desktop until hover, so the visible bar does end on the right .wrap line at x1360."
+  }
+ ],
+ "warnCount": 10,
+ "at": "2026-11-19T06:21:25.341Z",
+ "openTold": true
+}

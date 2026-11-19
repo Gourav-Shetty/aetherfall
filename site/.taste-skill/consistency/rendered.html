@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en" data-type="software" data-radius="soft" data-buttons="pill" data-motion="" class="m-enter mo-js m-enter-done mo-safe" data-mode="dark" style="--g-kl: 1.000; --g-k: 1.000; --g-kp: 0.287; --g-kd: 1.000;" data-tone="dark" data-ready="1"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>AETHERFALL: a browser MMO engine built from scratch</title>
+<meta name="description" content="A browser MMO engine with a 20Hz authoritative server, custom ECS and a binary protocol that cuts snapshot bytes by 93%.">
+<meta property="og:type" content="website">
+<meta property="og:title" content="AETHERFALL: a browser MMO engine built from scratch">
+<meta property="og:description" content="A 20Hz authoritative server, custom ECS and binary protocol, playable in your browser.">
+<meta property="og:image" content="share.jpg">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<meta name="theme-color" content="#0b0e14">
+<meta name="site-kind" content="gaming">
+<meta name="page-type" content="software">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="">
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@400..700&amp;family=Figtree:wght@400..600&amp;family=Martian+Mono:wght@400..500&amp;display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/system.css">
+<link rel="stylesheet" href="assets/ui/cards.css">
+<link rel="stylesheet" href="assets/motion/motion.css">
+<link rel="stylesheet" href="assets/backgrounds/backgrounds.css">
+<link rel="stylesheet" href="assets/layout/layout.css">
+<link rel="stylesheet" href="assets/icons/icon.css">
+<link rel="stylesheet" href="assets/diagrams/diagram.css">
+<style>
+:root {
+  --p-bg: #0b0e14; --p-surface: #141a24; --p-ink: #e8eef7; --p-muted: #82878f;
+  --p-accent: #e8c66a; --p-accent-ink: #0b0e14; --p-action: #e8c66a; --p-action-ink: #0b0e14;
+  --p-inv-bg: #e8eef7; --p-inv-surface: #d6dce5; --p-inv-ink: #0b0e14; --p-inv-muted: #545960;
+  --p-inv-accent: #0b0e14; --p-inv-accent-ink: #e8eef7; --p-inv-action: #0b0e14; --p-inv-action-ink: #e8eef7;
+  --font-display: "Sora", system-ui, sans-serif;
+  --font-text: "Figtree", system-ui, sans-serif;
+  --font-mono: "Martian Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  --display-weight: 400;
+  --display-tracking: -0.035em;
+  --display-tracking-xl: -0.045em;
+  --ly-scale: 0.9;
+}
+/* page CSS: the hero's calm-side box and the code block, inside the kit's tokens */
+.hero--photo .hero__text { background: var(--p-bg); }
+.code-block { background: var(--p-surface); border: 1px solid var(--p-line); border-radius: var(--r-md);
+  padding: var(--s-5); overflow-x: auto; font: 400 14px/1.7 var(--font-mono); color: var(--p-ink); }
+.code-block p { margin: 0; white-space: pre; }
+.type-statement { font: var(--display-weight) clamp(48px, 7vw, 104px)/1.04 var(--font-display);
+  letter-spacing: var(--display-tracking-xl); }
+</style>
+<script>document.documentElement.classList.add('m-enter');setTimeout(()=>document.documentElement.classList.add('m-enter-done'),700)</script>
+</head>
+<body>
+<!-- type: gaming (page type software, site-kind gaming)
+     deal: hero photo; nav-cards; close-word; footer-dark; media-band; pill buttons; ring mark
+     brand palette from the project's own navy/gold; Sora / Figtree + Martian Mono
+     moments: letters-assemble in the statement section
+     every section is one screen; the hero alone on the first -->
+<header class="nav" data-m-nav="1">
+  <div class="wrap nav__bar">
+    <a class="skip-link" href="#top">Skip to content</a>
+    <a class="nav__logo" href="#top"><span class="mark" data-mark="ring" aria-hidden="true"></span>AETHERFALL</a>
+    <nav class="nav__links" aria-label="Main">
+      <div class="nav__item">
+        <a class="nav__link" href="#world">World <svg class="chev" viewBox="0 0 12 12" aria-hidden="true"><path d="M3 4.5l3 3 3-3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"></path></svg></a><button class="nav__expand" type="button" aria-label="Show World links" aria-expanded="false"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path></svg></button>
+        <div class="nav__menu">
+          <div class="wrap grid">
+            <a class="menu-card span-4" href="#world"><div class="panel"><img class="frame__img" src="img/world.svg" alt="Isometric spawn shrine with HUD and minimap"></div><span class="t-card">AETHERFALL world</span><span class="t-small muted">Terrain, fog and landmarks</span></a>
+            <a class="menu-card span-4" href="#systems"><div class="panel"><img class="frame__img" src="img/hero.svg" alt="Night boss raid with a telegraph ring"></div><span class="t-card">Engine systems</span><span class="t-small muted">Tick, snapshots and combat</span></a>
+            <a class="menu-card span-4" href="#editor"><div class="panel"><img class="frame__img" src="img/editor.svg" alt="Level editor painting a boss arena"></div><span class="t-card">AETHERFALL level editor</span><span class="t-small muted">Paint walls, export collision</span></a>
+          </div>
+        </div>
+      </div>
+      <div class="nav__item"><a class="nav__link" href="#systems">Systems</a></div>
+      <div class="nav__item"><a class="nav__link" href="#editor">Editor</a></div>
+      <div class="nav__item"><a class="nav__link" href="#quickstart">Quickstart</a></div>
+    </nav>
+    <div class="nav__actions">
+
+    </div>
+    <button class="nav__toggle" type="button" aria-expanded="false" aria-label="Menu">
+      <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><path d="M2 5h14M2 13h14" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"></path></svg>
+    </button>
+  </div>
+</header>
+
+<main id="top">
+  <section class="hero hero--photo is-still is-entered" data-enter="" data-calm="left" aria-labelledby="hero-h">
+    <img class="hero__bg" src="img/hero.svg" alt="Night raid: a boss telegraph ring around the Stone Golem with damage numbers" style="--ly-pos: 50% 50%; --ly-pos-phone: 80% 50%" fetchpriority="high">
+    <div class="wrap"><div class="hero-text">
+      <div class="hero__text">
+        <p class="t-label">20Hz authoritative server · 10Hz interest-culled snapshots</p>
+        <h1 id="hero-h">AETHERFALL — browser MMO engine</h1>
+        <p class="hero__lead">A multiplayer world built from scratch: custom ECS, deterministic world generation and a binary protocol. No game engine, no networking library.</p>
+        <div class="btn-row"><a class="btn btn--primary" href="#quickstart">Start AETHERFALL</a><a class="btn btn--secondary" href="#world">See the world</a></div>
+      </div>
+    </div></div>
+  </section>
+
+  <section class="section" id="world" style="--h: 1" aria-labelledby="world-h">
+    <div class="wrap">
+      <div class="section-head">
+        <h2 id="world-h">AETHERFALL world</h2>
+        <p>Chunks generate from a seed as you walk. The same terrain, hazards and landmarks exist on the server and in the client, so a step always lands where it looks.</p>
+      </div>
+      <figure class="panel span-12" style="margin-top: var(--s-8)"><img class="frame__img" src="img/world.svg" alt="Isometric spawn shrine at day with fog of war, HUD bars and a minimap" loading="eager"></figure>
+    </div>
+  </section>
+
+  <section class="section" id="systems" style="--h: 1" aria-labelledby="systems-h">
+    <div class="wrap">
+      <div class="section-head">
+        <h2 id="systems-h">Engine systems</h2>
+        <p>Input arrives at 20Hz. The server resolves movement, combat and AI, then sends interest-culled snapshots at 10Hz. The client predicts your body and reconciles on the next ack.</p>
+      </div>
+      <div class="grid grid--top" style="margin-top: var(--s-8)">
+        <div class="card span-7">
+          <h3 class="t-card">One tick, from input to screen</h3>
+          <div class="panel"><div class="dg" data-diagram="{&quot;layout&quot;:&quot;lanes&quot;,&quot;curve&quot;:&quot;curve&quot;,&quot;alt&quot;:&quot;Client input goes through anticheat and the authoritative ECS tick, then interest culling and a binary snapshot return to every viewer.&quot;,&quot;input&quot;:{&quot;label&quot;:&quot;Input 20Hz&quot;,&quot;icon&quot;:&quot;ui:gamepad-2&quot;,&quot;meta&quot;:&quot;seq + move&quot;},&quot;core&quot;:{&quot;label&quot;:&quot;Authoritative tick&quot;,&quot;icon&quot;:&quot;ui:cpu&quot;},&quot;lanes&quot;:[{&quot;label&quot;:&quot;Anticheat&quot;,&quot;icon&quot;:&quot;ui:shield&quot;,&quot;meta&quot;:&quot;rate + speed&quot;},{&quot;label&quot;:&quot;ECS + AI&quot;,&quot;icon&quot;:&quot;ui:cog&quot;,&quot;meta&quot;:&quot;20Hz&quot;},{&quot;label&quot;:&quot;Interest cull&quot;,&quot;icon&quot;:&quot;ui:eye&quot;,&quot;meta&quot;:&quot;40m&quot;}],&quot;output&quot;:{&quot;label&quot;:&quot;Binary snapshot&quot;,&quot;icon&quot;:&quot;ui:radio&quot;,&quot;meta&quot;:&quot;10Hz&quot;}}" data-layout="lanes" role="img" aria-label="Client input goes through anticheat and the authoritative ECS tick, then interest culling and a binary snapshot return to every viewer." data-tier="n" data-orient="h" data-ground="dark" data-dg-ground="dots" style="--dg-cx: 242.3px; --dg-cy: 162.5px;"><svg class="dg-svg" width="671" height="325" viewBox="0 0 671 325" aria-hidden="true" focusable="false"><defs><radialGradient id="dgh21"><stop offset="0" class="dg-halo__in"></stop><stop offset="1" class="dg-halo__out"></stop></radialGradient><linearGradient id="dgc22" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="1" y2="0"><stop offset="0" class="dg-c0"></stop><stop offset="0.55" class="dg-c1"></stop><stop offset="1" class="dg-c2"></stop></linearGradient><linearGradient id="dgc23" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="1" y2="0"><stop offset="0" class="dg-c0"></stop><stop offset="0.55" class="dg-c1"></stop><stop offset="1" class="dg-c2"></stop></linearGradient><linearGradient id="dgc24" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="1" y2="0"><stop offset="0" class="dg-c0"></stop><stop offset="0.55" class="dg-c1"></stop><stop offset="1" class="dg-c2"></stop></linearGradient><linearGradient id="dgc25" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="1" y2="0"><stop offset="0" class="dg-c0"></stop><stop offset="0.55" class="dg-c1"></stop><stop offset="1" class="dg-c2"></stop></linearGradient><linearGradient id="dgc26" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="1" y2="0"><stop offset="0" class="dg-c0"></stop><stop offset="0.55" class="dg-c1"></stop><stop offset="1" class="dg-c2"></stop></linearGradient><linearGradient id="dgc27" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="1" y2="0"><stop offset="0" class="dg-c0"></stop><stop offset="0.55" class="dg-c1"></stop><stop offset="1" class="dg-c2"></stop></linearGradient><linearGradient id="dgc28" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="1" y2="0"><stop offset="0" class="dg-c0"></stop><stop offset="0.55" class="dg-c1"></stop><stop offset="1" class="dg-c2"></stop></linearGradient></defs><circle class="dg-halo" cx="242.3" cy="162.5" r="97.5" fill="url(#dgh21)"></circle><g class="dg-edges"><g class="dg-e"><path class="dg-line" d="M137 162.5L180.3 162.5"></path><path class="dg-lit" d="M137 162.5L180.3 162.5" style="opacity: 0;"></path><path class="dg-glow" d="M137 162.5L180.3 162.5" stroke="url(#dgc22)" stroke-dasharray="16.5 143.3" stroke-dashoffset="143.3"></path><path class="dg-comet" d="M137 162.5L180.3 162.5" stroke="url(#dgc22)" stroke-dasharray="30 143.3" stroke-dashoffset="143.3"></path><circle class="dg-spark-halo" r="6" cx="-50" cy="-50"></circle><circle class="dg-spark" r="2.1" cx="-50" cy="-50"></circle></g><g class="dg-e"><path class="dg-line" d="M304.3 162.5C326 162.5 326 94.5 347.7 94.5"></path><path class="dg-lit" d="M304.3 162.5C326 162.5 326 94.5 347.7 94.5" style="opacity: 0;"></path><path class="dg-glow" d="M304.3 162.5C326 162.5 326 94.5 347.7 94.5" stroke="url(#dgc23)" stroke-dasharray="18.7 193.3" stroke-dashoffset="193.3"></path><path class="dg-comet" d="M304.3 162.5C326 162.5 326 94.5 347.7 94.5" stroke="url(#dgc23)" stroke-dasharray="34.1 193.3" stroke-dashoffset="193.3"></path><circle class="dg-spark-halo" r="6" cx="-50" cy="-50"></circle><circle class="dg-spark" r="2.1" cx="-50" cy="-50"></circle></g><g class="dg-e"><path class="dg-line" d="M304.3 162.5L347.7 162.5"></path><path class="dg-lit" d="M304.3 162.5L347.7 162.5" style="opacity: 0;"></path><path class="dg-glow" d="M304.3 162.5L347.7 162.5" stroke="url(#dgc24)" stroke-dasharray="16.5 143.4" stroke-dashoffset="143.4"></path><path class="dg-comet" d="M304.3 162.5L347.7 162.5" stroke="url(#dgc24)" stroke-dasharray="30 143.4" stroke-dashoffset="143.4"></path><circle class="dg-spark-halo" r="6" cx="-50" cy="-50"></circle><circle class="dg-spark" r="2.1" cx="-50" cy="-50"></circle></g><g class="dg-e"><path class="dg-line" d="M304.3 162.5C326 162.5 326 230.5 347.7 230.5"></path><path class="dg-lit" d="M304.3 162.5C326 162.5 326 230.5 347.7 230.5" style="opacity: 0;"></path><path class="dg-glow" d="M304.3 162.5C326 162.5 326 230.5 347.7 230.5" stroke="url(#dgc25)" stroke-dasharray="18.7 193.3" stroke-dashoffset="193.3"></path><path class="dg-comet" d="M304.3 162.5C326 162.5 326 230.5 347.7 230.5" stroke="url(#dgc25)" stroke-dasharray="34.1 193.3" stroke-dashoffset="193.3"></path><circle class="dg-spark-halo" r="6" cx="-50" cy="-50"></circle><circle class="dg-spark" r="2.1" cx="-50" cy="-50"></circle></g><g class="dg-e"><path class="dg-line" d="M452.7 94.5C479.8 94.5 479.8 162.5 507 162.5"></path><path class="dg-lit" d="M452.7 94.5C479.8 94.5 479.8 162.5 507 162.5" style="opacity: 0;"></path><path class="dg-glow" d="M452.7 94.5C479.8 94.5 479.8 162.5 507 162.5" stroke="url(#dgc26)" stroke-dasharray="20.3 205.8" stroke-dashoffset="205.8"></path><path class="dg-comet" d="M452.7 94.5C479.8 94.5 479.8 162.5 507 162.5" stroke="url(#dgc26)" stroke-dasharray="36.9 205.8" stroke-dashoffset="205.8"></path><circle class="dg-spark-halo" r="6" cx="-50" cy="-50"></circle><circle class="dg-spark" r="2.1" cx="-50" cy="-50"></circle></g><g class="dg-e"><path class="dg-line" d="M447.7 162.5L507 162.5"></path><path class="dg-lit" d="M447.7 162.5L507 162.5" style="opacity: 0;"></path><path class="dg-glow" d="M447.7 162.5L507 162.5" stroke="url(#dgc27)" stroke-dasharray="16.5 159.3" stroke-dashoffset="159.3"></path><path class="dg-comet" d="M447.7 162.5L507 162.5" stroke="url(#dgc27)" stroke-dasharray="30 159.3" stroke-dashoffset="159.3"></path><circle class="dg-spark-halo" r="6" cx="-50" cy="-50"></circle><circle class="dg-spark" r="2.1" cx="-50" cy="-50"></circle></g><g class="dg-e"><path class="dg-line" d="M463.7 230.5C485.3 230.5 485.3 162.5 507 162.5"></path><path class="dg-lit" d="M463.7 230.5C485.3 230.5 485.3 162.5 507 162.5" style="opacity: 0;"></path><path class="dg-glow" d="M463.7 230.5C485.3 230.5 485.3 162.5 507 162.5" stroke="url(#dgc28)" stroke-dasharray="18.7 193.2" stroke-dashoffset="193.2"></path><path class="dg-comet" d="M463.7 230.5C485.3 230.5 485.3 162.5 507 162.5" stroke="url(#dgc28)" stroke-dasharray="34 193.2" stroke-dashoffset="193.2"></path><circle class="dg-spark-halo" r="6" cx="-50" cy="-50"></circle><circle class="dg-spark" r="2.1" cx="-50" cy="-50"></circle></g></g><g class="dg-ports"><circle class="dg-port" cx="137" cy="162.5" r="2"></circle><circle class="dg-port" cx="180.3" cy="162.5" r="2"></circle><circle class="dg-port" cx="304.3" cy="162.5" r="2"></circle><circle class="dg-port" cx="347.7" cy="94.5" r="2"></circle><circle class="dg-port" cx="304.3" cy="162.5" r="2"></circle><circle class="dg-port" cx="347.7" cy="162.5" r="2"></circle><circle class="dg-port" cx="304.3" cy="162.5" r="2"></circle><circle class="dg-port" cx="347.7" cy="230.5" r="2"></circle><circle class="dg-port" cx="452.7" cy="94.5" r="2"></circle><circle class="dg-port" cx="507" cy="162.5" r="2"></circle><circle class="dg-port" cx="447.7" cy="162.5" r="2"></circle><circle class="dg-port" cx="507" cy="162.5" r="2"></circle><circle class="dg-port" cx="463.7" cy="230.5" r="2"></circle><circle class="dg-port" cx="507" cy="162.5" r="2"></circle></g></svg><div class="dg-nodes" aria-hidden="true"><div class="dg-node dg-node--pill" data-id="input-20hz" style="left: 24px; top: 147px;"><span class="dg-ic" data-icon="ui:gamepad-2"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.75" d="M6 11h4M8 9v4m7-1h.01M18 10h.01m-.69-5H6.68a4 4 0 0 0-3.978 3.59l-.017.152C2.604 9.416 2 14.456 2 16a3 3 0 0 0 3 3c1 0 1.5-.5 2-1l1.414-1.414A2 2 0 0 1 9.828 16h4.344a2 2 0 0 1 1.414.586L17 18c.5.5 1 1 2 1a3 3 0 0 0 3-3c0-1.545-.604-6.584-.685-7.258q-.01-.075-.017-.151A4 4 0 0 0 17.32 5"></path></svg></span><span class="dg-label">Input 20Hz</span></div><div class="dg-node dg-node--core is-ink" data-id="authoritative-tick" style="left: 180px; top: 128px;"><span class="dg-ic" data-icon="ui:cpu"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.75"><path d="M12 20v2m0-20v2m5 16v2m0-20v2M2 12h2m-2 5h2M2 7h2m16 5h2m-2 5h2M20 7h2M7 20v2M7 2v2"></path><rect width="16" height="16" x="4" y="4" rx="2"></rect><rect width="8" height="8" x="8" y="8" rx="1"></rect></g></svg></span><span class="dg-cap dg-cap--in"><span class="dg-cap__l">Authoritative tick</span></span></div><div class="dg-node dg-node--pill" data-id="anticheat" style="left: 348px; top: 79px;"><span class="dg-ic" data-icon="ui:shield"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.75" d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"></path></svg></span><span class="dg-label">Anticheat</span></div><div class="dg-node dg-node--pill" data-id="ecs-ai" style="left: 348px; top: 147px;"><span class="dg-ic" data-icon="ui:cog"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.75"><path d="M11 10.27L7 3.34m4 10.39l-4 6.93M12 22v-2m0-18v2m2 8h8m-5 8.66l-1-1.73m1-15.59l-1 1.73M2 12h2m16.66 5l-1.73-1m1.73-9l-1.73 1M3.34 17l1.73-1M3.34 7l1.73 1"></path><circle cx="12" cy="12" r="2"></circle><circle cx="12" cy="12" r="8"></circle></g></svg></span><span class="dg-label">ECS + AI</span></div><div class="dg-node dg-node--pill" data-id="interest-cull" style="left: 348px; top: 215px;"><span class="dg-ic" data-icon="ui:eye"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.75"><path d="M2.062 12.348a1 1 0 0 1 0-.696a10.75 10.75 0 0 1 19.876 0a1 1 0 0 1 0 .696a10.75 10.75 0 0 1-19.876 0"></path><circle cx="12" cy="12" r="3"></circle></g></svg></span><span class="dg-label">Interest cull</span></div><div class="dg-node dg-node--pill" data-id="binary-snapshot" style="left: 507px; top: 147px;"><span class="dg-ic" data-icon="ui:radio"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.75"><path d="M16.247 7.761a6 6 0 0 1 0 8.478m2.828-11.306a10 10 0 0 1 0 14.134m-14.15 0a10 10 0 0 1 0-14.134m2.828 11.306a6 6 0 0 1 0-8.478"></path><circle cx="12" cy="12" r="2"></circle></g></svg></span><span class="dg-label">Binary snapshot</span></div></div></div><button class="loop-pause dg-pause" type="button" data-corner="br" aria-pressed="false" aria-label="Pause animation" data-state="false"><svg viewBox="0 0 14 14" aria-hidden="true"><path d="M3.5 2.5h2.5v9H3.5zM8 2.5h2.5v9H8z"></path></svg></button></div>
+        </div>
+        <div class="span-5 stack-4">
+          <div class="rows">
+            <div><span>Server tick</span><span>20Hz</span></div>
+            <div><span>Snapshot rate</span><span>10Hz</span></div>
+            <div><span>Interest radius</span><span>40m</span></div>
+            <div><span>Wire format</span><span>Binary v2, JSON fallback</span></div>
+            <div><span>Snapshot bytes</span><span>−93% against JSON</span></div>
+          </div>
+        </div>
+        <p class="type-statement" style="margin-top: var(--s-8)">Just sockets, math, and pixels.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="editor" style="--h: 1" aria-labelledby="editor-h">
+    <div class="wrap">
+      <div class="section-head">
+        <h2 id="editor-h">AETHERFALL level editor</h2>
+        <p>Paint walls into a live scene, export the collision as JSON and the server reads it on the next boot. The level editor runs in the same client as the game.</p>
+      </div>
+      <div class="grid grid--top" style="margin-top: var(--s-8)">
+        <div class="span-5">
+          <div class="rows">
+            <div><span>Renderer</span><span>Three.js isometric, Canvas 2D fallback</span></div>
+            <div><span>World</span><span>Infinite chunk stream, seeded</span></div>
+            <div><span>Pathfinding</span><span>A* with corner-cut prevention</span></div>
+            <div><span>Observability</span><span>Prometheus metrics, health endpoint</span></div>
+          </div>
+          <p style="margin-top: var(--s-6)"><a class="link" href="#quickstart">Run the editor</a></p>
+        </div>
+        <figure class="span-7 panel"><img class="frame__img" src="img/editor.svg" alt="Level editor with a painted wall arena and the boss arena trigger"></figure>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="quickstart" style="--h: 1" aria-labelledby="quickstart-h">
+    <div class="wrap">
+      <div class="section-head">
+        <h2 id="quickstart-h">AETHERFALL quickstart</h2>
+        <p>Node 22 and npm are enough. Build the workspaces, start the server in one terminal and the client in another, then open localhost:5173.</p>
+      </div>
+      <div style="margin-top: var(--s-8)" role="img" aria-label="Terminal commands: npm install, npm run build --workspaces, then start the server and client">
+        <p>npm install
+npm run build --workspaces
+node server/dist/index.js        # terminal 1, port 8081
+npm run dev --workspace=@aetherfall/client   # terminal 2, port 5173</p>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="footer closing footer--dark ground-inverse" id="contact" aria-labelledby="close-h">
+  <div class="wrap">
+    <div class="closing__cta close--word">
+      <div class="section-head">
+        <h2 id="close-h">Start locally</h2>
+        <p>Node 22, TypeScript and npm. No Docker needed for development.</p>
+      </div>
+      <a class="btn btn--primary" href="#quickstart">Start AETHERFALL<svg class="m-arrow" viewBox="0 0 12 12" aria-hidden="true"><path class="m-arrow__stem" d="M1 6h8"></path><path class="m-arrow__head" d="M4.5 2.5 8 6l-3.5 3.5"></path></svg></a>
+    </div>
+    <div class="closing__links">
+      <div class="grid">
+        <div class="span-4 stack-4">
+          <a class="nav__logo" href="#top"><span class="mark" data-mark="ring" aria-hidden="true"></span>AETHERFALL</a>
+          <p class="footer__lede">A browser MMO engine built from scratch.</p>
+        </div>
+        <div class="span-2 footer__col"><h3>Explore</h3><ul><li><a href="#world">World</a></li><li><a href="#systems">Systems</a></li><li><a href="#editor">Editor</a></li></ul></div>
+        <div class="span-2 footer__col"><h3>Start</h3><ul><li><a href="#quickstart">Quickstart</a></li><li><a href="#systems">Architecture</a></li></ul></div>
+        <div class="span-2 footer__col"><h3>Source</h3><ul><li><a href="#quickstart">Repository</a></li><li>MIT license</li></ul></div>
+      </div>
+      <div class="footer__legal">
+        <span>© 2026 AETHERFALL &nbsp; MIT license</span>
+        <div class="socials"></div>
+      </div>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/backgrounds/backgrounds.js"></script>
+<script>document.documentElement.classList.add('mo-js');setTimeout(()=>document.documentElement.classList.add('mo-safe'),2500)</script>
+<script type="module" src="assets/system.js"></script>
+<script type="module" src="assets/motion/motion.js"></script>
+<script type="module" src="assets/layout/layout.js"></script>
+<script type="module" src="assets/diagrams/mount.js"></script>
+
+
+</body></html>
